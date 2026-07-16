@@ -1,0 +1,42 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+script = "script"
+
+solc_version = "0.8.28"
+# `cancun` is supported by all six target chains (Ethereum, BNB, Polygon,
+# Arbitrum, Base, Optimism). Do not raise to `prague` without re-verifying
+# opcode support on every chain in chains.toml.
+evm_version = "cancun"
+optimizer = true
+# The paymaster is deployed once per chain but its validation path executes on
+# every sponsored UserOperation, so runtime gas dominates deployment cost.
+optimizer_runs = 1_000_000
+via_ir = false
+
+[profile.default.fuzz]
+runs = 512
+max_test_rejects = 100_000
+
+[profile.default.invariant]
+runs = 256
+depth = 64
+fail_on_revert = false
+
+[profile.ci.fuzz]
+runs = 10_000
+
+[profile.ci.invariant]
+runs = 1_000
+depth = 128
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = false
+int_types = "long"
+quote_style = "double"
+number_underscore = "thousands"
+multiline_func_header = "params_first"
