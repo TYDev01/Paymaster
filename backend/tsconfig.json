@@ -6,6 +6,13 @@
     "lib": ["ES2023"],
     "types": ["node"],
 
+    // NestJS decorators. `emitDecoratorMetadata` is deliberately OFF: esbuild (and therefore
+    // vitest) cannot emit it, and relying on it would force SWC into the test pipeline. Every
+    // provider is injected via an explicit @Inject token instead, which is what a ports-and-
+    // adapters design wants regardless — dependencies name an interface, not a concrete class.
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": false,
+
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,

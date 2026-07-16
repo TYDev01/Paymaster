@@ -74,3 +74,6 @@ jobs:
 
       - name: Test
         run: npm run test --workspaces --if-present
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
