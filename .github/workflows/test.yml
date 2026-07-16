@@ -39,3 +39,38 @@ jobs:
 
       - name: Run Forge tests
         run: forge test -vvv
+
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      # The backend's differential suite compares its digest against the real contract: it reads
+      # Foundry build artifacts and runs an anvil node. Both come from the toolchain, so this job
+      # needs Foundry even though it is testing TypeScript.
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Build contracts (produces artifacts the differential tests load)
+        run: forge build
+        working-directory: contracts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck --workspaces --if-present
+
+      - name: Test
+        run: npm run test --workspaces --if-present
