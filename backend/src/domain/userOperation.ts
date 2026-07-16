@@ -1,4 +1,4 @@
-import type {Address, Hex} from "viem";
+import {hexToBigInt, type Address, type Hex} from "viem";
 
 /**
  * EntryPoint v0.7 `PackedUserOperation`, mirroring the on-chain struct field for field.
@@ -46,4 +46,32 @@ export function packUint128Pair(high: bigint, low: bigint, label = "value"): big
   if (high < 0n || high > UINT128_MAX) throw new ValueOutOfRangeError(`${label}.high`, high, UINT128_MAX);
   if (low < 0n || low > UINT128_MAX) throw new ValueOutOfRangeError(`${label}.low`, low, UINT128_MAX);
   return (high << 128n) | low;
+}
+
+/** Inverse of {@link packUint128Pair}. Mirrors UserOperationLib's unpackHigh128/unpackLow128. */
+export function unpackUint128Pair(packed: Hex): {high: bigint; low: bigint} {
+  const value = hexToBigInt(packed);
+  return {high: value >> 128n, low: value & UINT128_MAX};
+}
+
+/**
+ * Named accessors for the packed fields. The pairing of each half to its meaning is fixed by
+ * UserOperationLib and is easy to invert by accident — `gasFees` puts maxPriorityFeePerGas in the
+ * HIGH half and maxFeePerGas in the LOW half, which is the opposite of the order the names are
+ * usually written in.
+ */
+export function verificationGasLimit(userOp: PackedUserOperation): bigint {
+  return unpackUint128Pair(userOp.accountGasLimits).high;
+}
+
+export function callGasLimit(userOp: PackedUserOperation): bigint {
+  return unpackUint128Pair(userOp.accountGasLimits).low;
+}
+
+export function maxPriorityFeePerGas(userOp: PackedUserOperation): bigint {
+  return unpackUint128Pair(userOp.gasFees).high;
+}
+
+export function maxFeePerGas(userOp: PackedUserOperation): bigint {
+  return unpackUint128Pair(userOp.gasFees).low;
 }

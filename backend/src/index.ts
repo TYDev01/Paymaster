@@ -1,5 +1,27 @@
 export type {PackedUserOperation} from "./domain/userOperation.js";
-export {packUint128Pair, UINT48_MAX, ValueOutOfRangeError} from "./domain/userOperation.js";
+export {
+  callGasLimit,
+  maxFeePerGas,
+  maxPriorityFeePerGas,
+  packUint128Pair,
+  UINT48_MAX,
+  unpackUint128Pair,
+  ValueOutOfRangeError,
+  verificationGasLimit,
+} from "./domain/userOperation.js";
+
+export {calculateMaxCost, type MaxCostParams} from "./chain/gas.js";
+export {
+  CANONICAL_ENTRYPOINT_V07,
+  InvalidChainConfigError,
+  validateChainConfig,
+  validateChainConfigs,
+  type ChainConfig,
+  type ChainConfigWarning,
+  type NativeCurrency,
+} from "./chain/chainConfig.js";
+export {ChainAdapter, type ChainHealth, type DepositInfo, type PaymasterFunding} from "./chain/chainAdapter.js";
+export {ChainDisabledError, ChainRegistry, UnknownChainError} from "./chain/chainRegistry.js";
 
 export {
   decodePaymasterAndData,
