@@ -104,7 +104,6 @@ contract VerifyingPaymaster is BasePaymaster, Ownable2Step, Pausable, EIP712 {
     error SignerNotAuthorised(address signer);
     error InvalidPaymasterDataLength(uint256 length);
     error InvalidSignatureLength(uint256 length);
-    error InvalidTimeRange(uint48 validUntil, uint48 validAfter);
 
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
@@ -189,6 +188,15 @@ contract VerifyingPaymaster is BasePaymaster, Ownable2Step, Pausable, EIP712 {
         uint48 validUntil,
         uint48 validAfter
     ) private pure returns (bytes32) {
+        // paymasterAndData[20:52] == paymasterVerificationGasLimit ++ postOpGasLimit.
+        uint256 paymasterGasLimits = uint256(
+            bytes32(
+                userOp.paymasterAndData[UserOperationLib.PAYMASTER_VALIDATION_GAS_OFFSET:UserOperationLib.PAYMASTER_DATA_OFFSET
+
+                ]
+            )
+        );
+
         return keccak256(
             abi.encode(
                 SPONSORSHIP_TYPEHASH,
@@ -197,12 +205,7 @@ contract VerifyingPaymaster is BasePaymaster, Ownable2Step, Pausable, EIP712 {
                 keccak256(userOp.initCode),
                 keccak256(userOp.callData),
                 userOp.accountGasLimits,
-                uint256(
-                    bytes32(
-                        userOp.paymasterAndData[UserOperationLib.PAYMASTER_VALIDATION_GAS_OFFSET:
-                            UserOperationLib.PAYMASTER_DATA_OFFSET]
-                    )
-                ),
+                paymasterGasLimits,
                 userOp.preVerificationGas,
                 userOp.gasFees,
                 validUntil,
@@ -212,11 +215,9 @@ contract VerifyingPaymaster is BasePaymaster, Ownable2Step, Pausable, EIP712 {
     }
 
     /// @notice Decode the paymaster-specific tail of `paymasterAndData`.
-    function parsePaymasterAndData(bytes calldata paymasterAndData)
-        public
-        pure
-        returns (uint48 validUntil, uint48 validAfter, bytes calldata signature)
-    {
+    function parsePaymasterAndData(
+        bytes calldata paymasterAndData
+    ) public pure returns (uint48 validUntil, uint48 validAfter, bytes calldata signature) {
         // Checked explicitly: a bare calldata slice on a short buffer reverts with no reason data,
         // which is opaque to debug from a failed simulation.
         if (paymasterAndData.length < SIGNATURE_OFFSET) {
@@ -231,12 +232,16 @@ contract VerifyingPaymaster is BasePaymaster, Ownable2Step, Pausable, EIP712 {
                              SIGNER MANAGEMENT
     //////////////////////////////////////////////////////////////*/
 
-    function isSigner(address signer) external view returns (bool) {
+    function isSigner(
+        address signer
+    ) external view returns (bool) {
         return _isSigner[signer];
     }
 
     /// @notice Authorise a new sponsorship signer.
-    function addSigner(address signer) external onlyOwner {
+    function addSigner(
+        address signer
+    ) external onlyOwner {
         if (signer == address(0)) revert ZeroAddress();
         if (_isSigner[signer]) revert SignerAlreadyAuthorised(signer);
         _addSigner(signer);
@@ -248,7 +253,9 @@ contract VerifyingPaymaster is BasePaymaster, Ownable2Step, Pausable, EIP712 {
     ///      signatures expire before revoking.
     ///      Revoking the last signer is permitted: it halts sponsorship, and is recoverable by the
     ///      owner adding a signer. It is not a lockout.
-    function removeSigner(address signer) external onlyOwner {
+    function removeSigner(
+        address signer
+    ) external onlyOwner {
         if (!_isSigner[signer]) revert SignerNotAuthorised(signer);
         _isSigner[signer] = false;
         unchecked {
@@ -257,7 +264,9 @@ contract VerifyingPaymaster is BasePaymaster, Ownable2Step, Pausable, EIP712 {
         emit SignerRemoved(signer, msg.sender);
     }
 
-    function _addSigner(address signer) private {
+    function _addSigner(
+        address signer
+    ) private {
         _isSigner[signer] = true;
         unchecked {
             ++signerCount;
@@ -305,11 +314,15 @@ contract VerifyingPaymaster is BasePaymaster, Ownable2Step, Pausable, EIP712 {
     /// @dev BasePaymaster brings in single-step `Ownable`; `Ownable2Step` is layered on top so a
     ///      typo'd owner address cannot brick administration of a funded paymaster.
 
-    function transferOwnership(address newOwner) public override(Ownable, Ownable2Step) onlyOwner {
+    function transferOwnership(
+        address newOwner
+    ) public override(Ownable, Ownable2Step) onlyOwner {
         Ownable2Step.transferOwnership(newOwner);
     }
 
-    function _transferOwnership(address newOwner) internal override(Ownable, Ownable2Step) {
+    function _transferOwnership(
+        address newOwner
+    ) internal override(Ownable, Ownable2Step) {
         Ownable2Step._transferOwnership(newOwner);
     }
 }

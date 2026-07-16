@@ -65,15 +65,19 @@ contract VerifyingPaymasterTest is Test {
                                  HELPERS
     //////////////////////////////////////////////////////////////*/
 
-    function _packGasLimits(uint128 high, uint128 low) internal pure returns (bytes32) {
+    function _packGasLimits(
+        uint128 high,
+        uint128 low
+    ) internal pure returns (bytes32) {
         return bytes32((uint256(high) << 128) | uint256(low));
     }
 
     /// @dev Builds the paymasterAndData prefix (everything the signature covers).
-    function _pmDataPrefix(uint48 validUntil, uint48 validAfter) internal view returns (bytes memory) {
-        return abi.encodePacked(
-            address(paymaster), PM_VERIFICATION_GAS, POSTOP_GAS, validUntil, validAfter
-        );
+    function _pmDataPrefix(
+        uint48 validUntil,
+        uint48 validAfter
+    ) internal view returns (bytes memory) {
+        return abi.encodePacked(address(paymaster), PM_VERIFICATION_GAS, POSTOP_GAS, validUntil, validAfter);
     }
 
     function _baseOp() internal view returns (PackedUserOperation memory op) {
@@ -107,15 +111,18 @@ contract VerifyingPaymasterTest is Test {
         return _signAccount(op);
     }
 
-    function _signAccount(PackedUserOperation memory op) internal view returns (PackedUserOperation memory) {
+    function _signAccount(
+        PackedUserOperation memory op
+    ) internal view returns (PackedUserOperation memory) {
         bytes32 userOpHash = entryPoint.getUserOpHash(op);
-        (uint8 v, bytes32 r, bytes32 s) =
-            vm.sign(accountOwnerKey, MessageHashUtils.toEthSignedMessageHash(userOpHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(accountOwnerKey, MessageHashUtils.toEthSignedMessageHash(userOpHash));
         op.signature = abi.encodePacked(r, s, v);
         return op;
     }
 
-    function _handle(PackedUserOperation memory op) internal {
+    function _handle(
+        PackedUserOperation memory op
+    ) internal {
         PackedUserOperation[] memory ops = new PackedUserOperation[](1);
         ops[0] = op;
         entryPoint.handleOps(ops, payable(beneficiary));
@@ -131,8 +138,7 @@ contract VerifyingPaymasterTest is Test {
         uint256 depositBefore = paymaster.getDeposit();
         assertEq(address(account).balance, 0, "account should start with no ETH");
 
-        PackedUserOperation memory op =
-            _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, signerKey);
+        PackedUserOperation memory op = _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, signerKey);
         _handle(op);
 
         assertEq(address(account).balance, 0, "account must not have paid for gas");
@@ -143,8 +149,7 @@ contract VerifyingPaymasterTest is Test {
     function test_sponsorsUserOp_consumesAccountNonce() public {
         uint256 nonceBefore = entryPoint.getNonce(address(account), 0);
 
-        PackedUserOperation memory op =
-            _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, signerKey);
+        PackedUserOperation memory op = _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, signerKey);
         _handle(op);
 
         assertEq(entryPoint.getNonce(address(account), 0), nonceBefore + 1, "nonce must advance");
@@ -153,15 +158,12 @@ contract VerifyingPaymasterTest is Test {
     /// A sponsorship signature cannot be replayed, because the EntryPoint rejects the reused
     /// nonce it is bound to. This is the test that justifies not adding a paymaster-side nonce.
     function test_replayOfSameSignature_reverts() public {
-        PackedUserOperation memory op =
-            _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, signerKey);
+        PackedUserOperation memory op = _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, signerKey);
         _handle(op);
 
         // Same op, same signature, second submission. The EntryPoint rejects it on the nonce it
         // was bound to — which is precisely the mechanism a paymaster-side nonce would duplicate.
-        vm.expectRevert(
-            abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA25 invalid account nonce")
-        );
+        vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA25 invalid account nonce"));
         _handle(op);
     }
 
@@ -173,25 +175,19 @@ contract VerifyingPaymasterTest is Test {
     /// revert from inside the paymaster.
     function test_unauthorisedSigner_failsValidation() public {
         (, uint256 attackerKey) = makeAddrAndKey("attacker");
-        PackedUserOperation memory op =
-            _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, attackerKey);
+        PackedUserOperation memory op = _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, attackerKey);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA34 signature error")
-        );
+        vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA34 signature error"));
         _handle(op);
     }
 
     function test_revokedSigner_failsValidation() public {
-        PackedUserOperation memory op =
-            _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, signerKey);
+        PackedUserOperation memory op = _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, signerKey);
 
         vm.prank(owner);
         paymaster.removeSigner(signer);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA34 signature error")
-        );
+        vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA34 signature error"));
         _handle(op);
     }
 
@@ -204,8 +200,7 @@ contract VerifyingPaymasterTest is Test {
         paymaster.removeSigner(signer);
         vm.stopPrank();
 
-        PackedUserOperation memory op =
-            _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, newKey);
+        PackedUserOperation memory op = _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, newKey);
         _handle(op);
 
         assertEq(address(account).balance, 0, "rotated signer's sponsorship must be honoured");
@@ -230,9 +225,7 @@ contract VerifyingPaymasterTest is Test {
             abi.encodePacked(address(paymaster), PM_VERIFICATION_GAS, POSTOP_GAS * 10, validUntil, uint48(0), sig);
         op = _signAccount(op);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA34 signature error")
-        );
+        vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA34 signature error"));
         _handle(op);
     }
 
@@ -244,9 +237,7 @@ contract VerifyingPaymasterTest is Test {
         op.callData = abi.encodeCall(SimpleAccount.execute, (target, 1 ether, ""));
         op = _signAccount(op);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA34 signature error")
-        );
+        vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA34 signature error"));
         _handle(op);
     }
 
@@ -263,8 +254,7 @@ contract VerifyingPaymasterTest is Test {
         PackedUserOperation memory op = _baseOp();
 
         // Sign the *other* paymaster's digest...
-        op.paymasterAndData =
-            abi.encodePacked(address(other), PM_VERIFICATION_GAS, POSTOP_GAS, validUntil, uint48(0));
+        op.paymasterAndData = abi.encodePacked(address(other), PM_VERIFICATION_GAS, POSTOP_GAS, validUntil, uint48(0));
         bytes32 otherDigest = other.getHash(op, validUntil, 0);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, otherDigest);
 
@@ -272,9 +262,7 @@ contract VerifyingPaymasterTest is Test {
         op.paymasterAndData = abi.encodePacked(_pmDataPrefix(validUntil, uint48(0)), r, s, v);
         op = _signAccount(op);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA34 signature error")
-        );
+        vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA34 signature error"));
         _handle(op);
     }
 
@@ -293,16 +281,12 @@ contract VerifyingPaymasterTest is Test {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, digestOnBase);
 
         vm.chainId(originalChainId);
-        assertTrue(
-            paymaster.domainSeparator() != baseSeparator, "domain separator must track chainId"
-        );
+        assertTrue(paymaster.domainSeparator() != baseSeparator, "domain separator must track chainId");
 
         op.paymasterAndData = abi.encodePacked(_pmDataPrefix(validUntil, uint48(0)), r, s, v);
         op = _signAccount(op);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA34 signature error")
-        );
+        vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA34 signature error"));
         _handle(op);
     }
 
@@ -337,8 +321,7 @@ contract VerifyingPaymasterTest is Test {
         vm.prank(owner);
         paymaster.pause();
 
-        PackedUserOperation memory op =
-            _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, signerKey);
+        PackedUserOperation memory op = _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, signerKey);
 
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -357,8 +340,7 @@ contract VerifyingPaymasterTest is Test {
         paymaster.unpause();
         vm.stopPrank();
 
-        PackedUserOperation memory op =
-            _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, signerKey);
+        PackedUserOperation memory op = _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, signerKey);
         _handle(op);
 
         assertEq(address(account).balance, 0, "sponsorship must work after unpause");
@@ -433,21 +415,23 @@ contract VerifyingPaymasterTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     /// Only the authorised key may sponsor, for any key the fuzzer can produce.
-    function testFuzz_onlyAuthorisedSignerSponsors(uint256 key) public {
+    function testFuzz_onlyAuthorisedSignerSponsors(
+        uint256 key
+    ) public {
         key = bound(key, 1, type(uint128).max);
         vm.assume(vm.addr(key) != signer);
 
-        PackedUserOperation memory op =
-            _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, key);
+        PackedUserOperation memory op = _sponsorAndSign(_baseOp(), uint48(block.timestamp + 1 hours), 0, key);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA34 signature error")
-        );
+        vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA34 signature error"));
         _handle(op);
     }
 
     /// The timestamps that come back out of paymasterAndData must be the ones that went in.
-    function testFuzz_parsePaymasterAndDataRoundTrips(uint48 validUntil, uint48 validAfter) public view {
+    function testFuzz_parsePaymasterAndDataRoundTrips(
+        uint48 validUntil,
+        uint48 validAfter
+    ) public view {
         bytes memory data = abi.encodePacked(
             address(paymaster), PM_VERIFICATION_GAS, POSTOP_GAS, validUntil, validAfter, new bytes(65)
         );
