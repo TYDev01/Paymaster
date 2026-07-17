@@ -1,4 +1,5 @@
 import {Module, type DynamicModule} from "@nestjs/common";
+import IORedis, {type Redis} from "ioredis";
 
 import {hashApiKey} from "../auth/apiKey.js";
 import {createPool, type DatabasePool} from "../db/pool.js";
@@ -10,6 +11,9 @@ import type {ApiKeyStore} from "../auth/apiKeyStore.js";
 import {InMemoryApiKeyStore} from "../auth/inMemoryApiKeyStore.js";
 import {ChainRegistry} from "../chain/chainRegistry.js";
 import {PolicyEngine, type Policy} from "../policy/engine.js";
+import {InMemoryQuotaStore} from "../policy/quota/inMemoryQuotaStore.js";
+import {RedisQuotaStore} from "../policy/quota/redisQuotaStore.js";
+import type {QuotaStore} from "../policy/quota/quotaStore.js";
 import {PolicySource, type PolicyRepository} from "../policy/policySource.js";
 import {SignatureEngine} from "../signature/signatureEngine.js";
 import {LocalSponsorshipSigner, type SponsorshipSigner} from "../signature/signer.js";
@@ -28,6 +32,10 @@ export interface AppDependencies {
   readonly sponsorships?: SponsorshipRepository | undefined;
   /** Held so bootstrap can close it on shutdown. */
   readonly pool?: DatabasePool | undefined;
+  /** Held so bootstrap can close it on shutdown. Undefined when running without Redis. */
+  readonly redis?: Redis | undefined;
+  /** True when quota counters are process-local, so quotas do not hold across replicas. */
+  readonly quotasAreLocal: boolean;
   readonly env: Env;
 }
 
@@ -75,9 +83,16 @@ export class AppModule {
  * Deliberately not inside AppModule: constructing the graph is separable from serving HTTP, and
  * this is the seam where a KMS signer replaces the local one in production.
  */
-export async function buildDependencies(env: Env, policies: readonly Policy[]): Promise<AppDependencies> {
+export async function buildDependencies(
+  env: Env,
+  makePolicies: (quotas: QuotaStore) => readonly Policy[],
+): Promise<AppDependencies> {
   const chains = ChainRegistry.fromConfigs(parseChainsJson(env.CHAINS));
 
+  const redis = env.REDIS_URL === undefined ? undefined : new IORedis(env.REDIS_URL, {maxRetriesPerRequest: 3});
+  const quotas: QuotaStore = redis === undefined ? new InMemoryQuotaStore() : new RedisQuotaStore(redis);
+
+  const policies = makePolicies(quotas);
   const repository: PolicyRepository = {load: async () => policies};
   const policySource = new PolicySource(repository);
   await policySource.reload();
@@ -102,6 +117,8 @@ export async function buildDependencies(env: Env, policies: readonly Policy[]): 
     apiKeys: pool === undefined ? buildApiKeyStore(env) : new PostgresApiKeyStore(pool),
     sponsorships: pool === undefined ? undefined : new SponsorshipRepository(pool),
     pool,
+    redis,
+    quotasAreLocal: redis === undefined,
     env,
   };
 }

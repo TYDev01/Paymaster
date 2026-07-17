@@ -50,6 +50,15 @@ export const envSchema = z.object({
     .default("true")
     .transform((v) => v !== "false"),
 
+  /**
+   * Redis connection string.
+   *
+   * Optional, and its absence is a real limitation rather than a nicety: without it quota counters
+   * live in process memory, so N replicas give every caller N times their quota. Required for any
+   * horizontally scaled deployment — `bootstrap` warns when it is missing.
+   */
+  REDIS_URL: z.string().url().optional(),
+
   SPONSORSHIP_VALIDITY_SECONDS: z.coerce.number().int().min(30).max(3600).default(300),
   PAYMASTER_VERIFICATION_GAS_LIMIT: z.coerce.bigint().default(300_000n),
   POSTOP_GAS_LIMIT: z.coerce.bigint().default(50_000n),

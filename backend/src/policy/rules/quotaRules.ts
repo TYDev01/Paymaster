@@ -8,6 +8,21 @@ export type QuotaSubject = "wallet" | "ip" | "apiKey" | "chain" | "target" | "gl
 /** What is being counted: operations, or wei of gas. */
 export type QuotaUnit = "operations" | "wei";
 
+/**
+ * Spend quotas are COUNTED in gwei, even though they are configured and reported in wei.
+ *
+ * This is forced by the counter stores, not chosen for convenience. Redis `INCRBY` takes a signed
+ * 64-bit integer and errors with "increment or decrement would overflow" past 9.22e18 — which is
+ * 9.22 ETH, so a 10 ETH daily cap cannot be counted in wei at all. Worse, Redis Lua numbers are
+ * doubles: `tonumber("1000000000000000001")` yields 1e18 and `1e18 + 1` yields 1e18, so wei
+ * arithmetic in a Lua script does not overflow loudly — it silently returns the wrong number.
+ *
+ * In gwei the same int64 holds ~9.2e9 ETH and Lua's 53-bit mantissa stays exact to ~9e6 ETH, both
+ * far beyond any real paymaster. The cost is 1-gwei granularity on spend accounting, against a
+ * single operation costing on the order of a million gwei.
+ */
+const WEI_PER_GWEI = 1_000_000_000n;
+
 export interface QuotaRuleOptions {
   readonly name: string;
   readonly subject: QuotaSubject;
@@ -39,6 +54,8 @@ export class QuotaRule implements ReservingRule {
 
   readonly #store: QuotaStore;
   readonly #options: Required<QuotaRuleOptions>;
+  /** The limit in COUNTING units: operations, or gwei. See WEI_PER_GWEI. */
+  readonly #countedLimit: bigint;
 
   constructor(store: QuotaStore, options: QuotaRuleOptions) {
     if (options.limit < 0n) throw new RangeError(`quota limit must be >= 0, got ${options.limit}`);
@@ -47,6 +64,9 @@ export class QuotaRule implements ReservingRule {
     this.#store = store;
     this.name = options.name;
     this.#options = {...options, onMissingSubject: options.onMissingSubject ?? "deny"};
+    // Limits round DOWN and charges round UP: both errors land on the side of spending less than
+    // configured, never more.
+    this.#countedLimit = options.unit === "wei" ? options.limit / WEI_PER_GWEI : options.limit;
   }
 
   async evaluate(context: PolicyContext): Promise<PolicyDecision> {
@@ -64,7 +84,7 @@ export class QuotaRule implements ReservingRule {
     const outcome = await this.#store.tryConsume({
       key,
       amount,
-      limit: this.#options.limit,
+      limit: this.#countedLimit,
       windowSeconds: this.#options.windowSeconds,
       now: context.now,
     });
@@ -76,7 +96,7 @@ export class QuotaRule implements ReservingRule {
       this.name,
       code,
       `${this.#options.subject} ${this.#options.unit} quota exhausted: ` +
-        `${outcome.usage}/${outcome.limit}, resets at ${outcome.resetsAt}`,
+        `${this.#report(outcome.usage)}/${this.#report(outcome.limit)}, resets at ${outcome.resetsAt}`,
     );
   }
 
@@ -91,17 +111,34 @@ export class QuotaRule implements ReservingRule {
     });
   }
 
-  /** Remaining budget, for surfacing to callers. Never used to decide — that would reintroduce the race. */
+  /**
+   * Remaining budget in the CONFIGURED unit (wei for spend caps), for surfacing to callers.
+   * Never used to decide — that would reintroduce the race tryConsume exists to close.
+   */
   async remaining(context: PolicyContext): Promise<bigint | undefined> {
     const key = this.#keyFor(context);
     if (key === undefined) return undefined;
     const used = await this.#store.usage(key, this.#options.windowSeconds, context.now);
-    const left = this.#options.limit - used;
-    return left > 0n ? left : 0n;
+    const left = this.#countedLimit - used;
+    return this.#report(left > 0n ? left : 0n);
   }
 
+  /**
+   * The amount to charge, in counting units.
+   *
+   * Spend rounds UP to the next gwei. Rounding down would let an operation cheap enough to floor
+   * to zero consume no budget at all — a cap that can be bypassed by making requests small enough
+   * is not a cap. In practice a real operation costs on the order of 1e6 gwei, so this rounding is
+   * noise; it is the direction that matters.
+   */
   #amountFor(context: PolicyContext): bigint {
-    return this.#options.unit === "wei" ? context.maxCost : 1n;
+    if (this.#options.unit !== "wei") return 1n;
+    return (context.maxCost + WEI_PER_GWEI - 1n) / WEI_PER_GWEI;
+  }
+
+  /** Converts a counted value back to the configured unit, for messages and `remaining`. */
+  #report(counted: bigint): bigint {
+    return this.#options.unit === "wei" ? counted * WEI_PER_GWEI : counted;
   }
 
   /**

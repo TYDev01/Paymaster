@@ -17,10 +17,24 @@ export async function bootstrap(): Promise<NestFastifyApplication> {
   const logger = new Logger("bootstrap");
   const env = parseEnv();
 
-  const deps = await buildDependencies(env, defaultPolicies(env));
+  const deps = await buildDependencies(env, (quotas) => defaultPolicies(env, quotas));
 
   for (const warning of deps.chains.warnings) {
     logger.warn(`chain ${warning.chainId}: ${warning.message}`);
+  }
+
+  // These are not nits: each one silently breaks an assumption an operator is likely to be making.
+  if (deps.quotasAreLocal) {
+    logger.warn(
+      "REDIS_URL is not set: quota counters are process-local, so every replica grants a full " +
+        "quota independently. Do not run more than one instance without Redis.",
+    );
+  }
+  if (deps.pool === undefined) {
+    logger.warn(
+      "DATABASE_URL is not set: API keys will not survive a restart and no sponsorship records " +
+        "are kept, so issued attestations cannot be audited.",
+    );
   }
 
   // Assert every RPC serves the chain its config claims, before accepting traffic. A mismatch

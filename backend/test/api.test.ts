@@ -195,6 +195,7 @@ describe("POST /paymaster/sponsor", () => {
       chains: ChainRegistry.fromConfigs([chainConfig, {...chainConfig, chainId: 999_999, enabled: false}]),
       policies: policySource,
       signer: new LocalSponsorshipSigner(signerKey),
+      quotasAreLocal: true,
       apiKeys: new InMemoryApiKeyStore([
         record(sponsorKeyGen, {id: "sponsor", roles: ["sponsor"]}),
         record(viewerKeyGen, {id: "viewer", roles: ["viewer"]}),
