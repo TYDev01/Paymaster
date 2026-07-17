@@ -60,6 +60,8 @@ describe("POST /paymaster/sponsor", () => {
     PAYMASTER_VERIFICATION_GAS_LIMIT: 300_000n,
     POSTOP_GAS_LIMIT: 50_000n,
     DEFAULT_POLICY_ID: "default",
+    DATABASE_MAX_CONNECTIONS: 10,
+    DATABASE_MIGRATE_ON_BOOT: true,
   };
 
   beforeAll(async () => {

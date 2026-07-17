@@ -1,6 +1,10 @@
 import {Module, type DynamicModule} from "@nestjs/common";
 
 import {hashApiKey} from "../auth/apiKey.js";
+import {createPool, type DatabasePool} from "../db/pool.js";
+import {migrate} from "../db/migrate.js";
+import {PostgresApiKeyStore} from "../db/postgresApiKeyStore.js";
+import {SponsorshipRepository} from "../db/sponsorshipRepository.js";
 import {ApiKeyAuthenticator} from "../auth/authenticator.js";
 import type {ApiKeyStore} from "../auth/apiKeyStore.js";
 import {InMemoryApiKeyStore} from "../auth/inMemoryApiKeyStore.js";
@@ -20,6 +24,10 @@ export interface AppDependencies {
   readonly policies: PolicySource;
   readonly signer: SponsorshipSigner;
   readonly apiKeys: ApiKeyStore;
+  /** Records what we committed to pay. Absent when running without a database. */
+  readonly sponsorships?: SponsorshipRepository | undefined;
+  /** Held so bootstrap can close it on shutdown. */
+  readonly pool?: DatabasePool | undefined;
   readonly env: Env;
 }
 
@@ -38,6 +46,7 @@ export class AppModule {
       policies: deps.policies,
       policyEngine: new PolicyEngine(),
       signatureEngine: new SignatureEngine(deps.signer),
+      sponsorships: deps.sponsorships,
       options: {
         validitySeconds: deps.env.SPONSORSHIP_VALIDITY_SECONDS,
         paymasterVerificationGasLimit: deps.env.PAYMASTER_VERIFICATION_GAS_LIMIT,
@@ -73,13 +82,52 @@ export async function buildDependencies(env: Env, policies: readonly Policy[]): 
   const policySource = new PolicySource(repository);
   await policySource.reload();
 
+  const pool =
+    env.DATABASE_URL === undefined
+      ? undefined
+      : createPool({connectionString: env.DATABASE_URL, maxConnections: env.DATABASE_MAX_CONNECTIONS});
+
+  if (pool !== undefined && env.DATABASE_MIGRATE_ON_BOOT) {
+    await migrate(pool);
+  }
+
+  if (pool !== undefined && env.BOOTSTRAP_API_KEY !== undefined) {
+    await ensureBootstrapKey(pool, env.BOOTSTRAP_API_KEY);
+  }
+
   return {
     chains,
     policies: policySource,
     signer: new LocalSponsorshipSigner(env.SPONSORSHIP_SIGNER_KEY),
-    apiKeys: buildApiKeyStore(env),
+    apiKeys: pool === undefined ? buildApiKeyStore(env) : new PostgresApiKeyStore(pool),
+    sponsorships: pool === undefined ? undefined : new SponsorshipRepository(pool),
+    pool,
     env,
   };
+}
+
+/**
+ * Seeds the bootstrap admin key into the database if it is not already there.
+ *
+ * The row id is derived from the key's hash, so a given key always maps to the same row. Two
+ * consequences, both deliberate:
+ *
+ *   * It is idempotent and safe under a rolling deploy — every replica computes the same id and
+ *     ON CONFLICT makes the losers no-ops.
+ *
+ *   * A REVOKED bootstrap key stays revoked across restarts. Keying the row on a fixed id and
+ *     upserting would resurrect a key an operator had deliberately killed, every time a pod
+ *     restarted. Rotating means setting a new BOOTSTRAP_API_KEY, which lands as a new row and
+ *     leaves the revoked one auditable.
+ */
+async function ensureBootstrapKey(pool: DatabasePool, secret: string): Promise<void> {
+  const hash = hashApiKey(secret);
+  await pool.query(
+    `INSERT INTO api_keys (id, name, key_hash, display_prefix, roles, enabled)
+     VALUES ($1, $2, $3, $4, ARRAY['admin'], true)
+     ON CONFLICT (key_hash) DO NOTHING`,
+    [`bootstrap-${hash.slice(0, 12)}`, "bootstrap admin key", hash, secret.slice(0, 16)],
+  );
 }
 
 /**

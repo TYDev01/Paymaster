@@ -35,6 +35,21 @@ export const envSchema = z.object({
   /** Chains, as JSON. Parsed and validated by `parseChainsJson`. */
   CHAINS: z.string().min(1),
 
+  /**
+   * PostgreSQL connection string.
+   *
+   * Optional. Without it the service runs on in-memory stores: correct for a single process, but
+   * API keys vanish on restart and sponsorship records are not kept. Required for anything
+   * multi-replica or auditable — `bootstrap` warns when it is absent.
+   */
+  DATABASE_URL: z.string().url().optional(),
+  DATABASE_MAX_CONNECTIONS: z.coerce.number().int().min(1).max(100).default(10),
+  /** Run pending migrations at startup. See migrate() for why this is safe under rolling deploys. */
+  DATABASE_MIGRATE_ON_BOOT: z
+    .string()
+    .default("true")
+    .transform((v) => v !== "false"),
+
   SPONSORSHIP_VALIDITY_SECONDS: z.coerce.number().int().min(30).max(3600).default(300),
   PAYMASTER_VERIFICATION_GAS_LIMIT: z.coerce.bigint().default(300_000n),
   POSTOP_GAS_LIMIT: z.coerce.bigint().default(50_000n),

@@ -1,4 +1,4 @@
-import {slice, toHex, type Hex} from "viem";
+import {slice, toHex, type Address, type Hex} from "viem";
 
 import {calculateMaxCost} from "../../chain/gas.js";
 import type {ChainRegistry} from "../../chain/chainRegistry.js";
@@ -31,11 +31,36 @@ export interface SponsorServiceOptions {
   readonly defaultPolicyId: string;
 }
 
+/**
+ * Records what we committed to pay. A port, so this service does not depend on PostgreSQL —
+ * SponsorshipRepository satisfies it structurally.
+ */
+export interface SponsorshipRecorder {
+  record(sponsorship: {
+    chainId: number;
+    sender: Address;
+    nonce: bigint;
+    paymaster: Address;
+    entryPoint: Address;
+    apiKeyId: string;
+    policyId: string;
+    signer: Address;
+    maxCostWei: bigint;
+    validAfter: number;
+    validUntil: number;
+  }): Promise<unknown>;
+}
+
 export interface SponsorServiceDeps {
   readonly chains: ChainRegistry;
   readonly policies: PolicySource;
   readonly policyEngine: PolicyEngine;
   readonly signatureEngine: SignatureEngine;
+  /**
+   * Optional. When absent — a single-node deployment with no database — attestations are issued
+   * but not recorded, and there is no audit trail. `bootstrap` warns about this.
+   */
+  readonly sponsorships?: SponsorshipRecorder | undefined;
   readonly options: SponsorServiceOptions;
   /** Injected so evaluation is deterministic and testable. Unix seconds. */
   readonly now?: () => number;
@@ -107,6 +132,32 @@ export class SponsorService {
         postOpGasLimit: options.postOpGasLimit,
         validUntil,
         validAfter: 0,
+      });
+
+      /**
+       * Recorded BEFORE the attestation is returned, and awaited.
+       *
+       * This trades availability for auditability, deliberately. If the database is down we could
+       * return the attestation anyway and stay up — but then we have signed a commitment to spend
+       * money with no record of who asked, under what policy, or for how much. "We paid and cannot
+       * say why" is a worse outcome than "we declined for ten minutes": the first is unbounded and
+       * permanent, the second is bounded and recoverable.
+       *
+       * A failure here falls into the catch below, which releases the reservation and surfaces the
+       * error — so the caller is not charged quota for a sponsorship they never received.
+       */
+      await this.#deps.sponsorships?.record({
+        chainId: request.chainId,
+        sender: request.userOperation.sender,
+        nonce: request.userOperation.nonce,
+        paymaster: chain.config.paymaster,
+        entryPoint: chain.config.entryPoint,
+        apiKeyId: caller.apiKeyId ?? "anonymous",
+        policyId,
+        signer: attestation.signer,
+        maxCostWei: maxCost,
+        validAfter: attestation.validAfter,
+        validUntil: attestation.validUntil,
       });
 
       return {

@@ -61,6 +61,7 @@ Where multiple implementation approaches exist, choose the solution that would b
 
 Whenever possible, design the system using clean architecture and domain-driven design principles.
 
+
 Build a complete, production-ready ERC-4337 Paymaster infrastructure that I fully own and operate.
 
 Do **not** integrate or depend on Pimlico, Alchemy, Biconomy, ZeroDev, or any hosted Paymaster service.

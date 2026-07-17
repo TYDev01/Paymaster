@@ -10,7 +10,11 @@ import {QuotaRule} from "../src/policy/rules/quotaRules.js";
 import {SenderBlocklistRule} from "../src/policy/rules/accessLists.js";
 import {SignatureEngine} from "../src/signature/signatureEngine.js";
 import {LocalSponsorshipSigner, type SponsorshipSigner} from "../src/signature/signer.js";
-import {SponsorService, SponsorshipDeniedError} from "../src/api/sponsor/sponsor.service.js";
+import {
+  SponsorService,
+  SponsorshipDeniedError,
+  type SponsorshipRecorder,
+} from "../src/api/sponsor/sponsor.service.js";
 import type {SponsorRequest} from "../src/api/dto/sponsorRequest.js";
 
 const SIGNER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" as Hex;
@@ -68,7 +72,12 @@ function request(): SponsorRequest {
   } as SponsorRequest;
 }
 
-async function buildService(signer: SponsorshipSigner, policies: readonly Policy[], now = 1_700_000_000) {
+async function buildService(
+  signer: SponsorshipSigner,
+  policies: readonly Policy[],
+  now = 1_700_000_000,
+  sponsorships?: SponsorshipRecorder,
+) {
   const source = new PolicySource({load: async () => policies});
   await source.reload();
 
@@ -77,6 +86,7 @@ async function buildService(signer: SponsorshipSigner, policies: readonly Policy
     policies: source,
     policyEngine: new PolicyEngine(),
     signatureEngine: new SignatureEngine(signer),
+    sponsorships,
     options: {
       validitySeconds: 300,
       paymasterVerificationGasLimit: 300_000n,
@@ -202,6 +212,61 @@ describe("SponsorService", () => {
 
     const usage = await store.usage(`quota:wallet-daily:${CHAIN_ID}:${SENDER.toLowerCase()}`, 86_400, 1_700_000_000);
     expect(usage).toBe(1n);
+  });
+
+  describe("recording", () => {
+    it("records what it committed to pay", async () => {
+      const recorded: Parameters<SponsorshipRecorder["record"]>[0][] = [];
+      const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [{id: "default", rules: []}], 1_700_000_000, {
+        record: async (s) => void recorded.push(s),
+      });
+
+      await service.sponsor(request(), {apiKeyId: "key-1"});
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]).toMatchObject({
+        chainId: CHAIN_ID,
+        sender: SENDER,
+        apiKeyId: "key-1",
+        policyId: "default",
+        maxCostWei: 1_150_000n * 20_000_000_000n,
+      });
+    });
+
+    /**
+     * Auditability over availability: an attestation we cannot account for is worse than a
+     * sponsorship we declined. A recorder failure must not produce a silently unrecorded promise.
+     */
+    it("does not return an attestation it could not record", async () => {
+      const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [{id: "default", rules: []}], 1_700_000_000, {
+        record: async () => {
+          throw new Error("database unreachable");
+        },
+      });
+
+      await expect(service.sponsor(request())).rejects.toThrow("database unreachable");
+    });
+
+    it("refunds quota when recording fails", async () => {
+      const store = new InMemoryQuotaStore();
+      const quota = new QuotaRule(store, {
+        name: "wallet-daily",
+        subject: "wallet",
+        unit: "operations",
+        limit: 3n,
+        windowSeconds: 86_400,
+      });
+      const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [{id: "default", rules: [quota]}], 1_700_000_000, {
+        record: async () => {
+          throw new Error("database unreachable");
+        },
+      });
+
+      await expect(service.sponsor(request())).rejects.toThrow("database unreachable");
+
+      const usage = await store.usage(`quota:wallet-daily:${CHAIN_ID}:${SENDER.toLowerCase()}`, 86_400, 1_700_000_000);
+      expect(usage, "a sponsorship we could not record must not consume quota").toBe(0n);
+    });
   });
 
   it("passes caller identity through to policy", async () => {
