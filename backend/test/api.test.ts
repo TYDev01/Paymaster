@@ -16,6 +16,9 @@ import {InMemoryQuotaStore} from "../src/policy/quota/inMemoryQuotaStore.js";
 import {ChainEnabledRule, SenderBlocklistRule} from "../src/policy/rules/accessLists.js";
 import {QuotaRule} from "../src/policy/rules/quotaRules.js";
 import {LocalSponsorshipSigner} from "../src/signature/signer.js";
+import {generateApiKey} from "../src/auth/apiKey.js";
+import {InMemoryApiKeyStore} from "../src/auth/inMemoryApiKeyStore.js";
+import type {ApiKeyRecord} from "../src/auth/apiKeyStore.js";
 import type {Env} from "../src/config/env.js";
 import {deploy, loadArtifact, startAnvil, type AnvilInstance} from "./support/anvil.js";
 
@@ -36,6 +39,11 @@ describe("POST /paymaster/sponsor", () => {
   let entryPointAbi: ReturnType<typeof loadArtifact>["abi"];
   let chainId: number;
   let blockedPolicyId: string;
+  let sponsorKey: string;
+  let viewerKey: string;
+  let revokedKey: string;
+  let expiredKey: string;
+  let pinnedKey: string;
 
   const signerKey = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" as Hex;
   const signer = privateKeyToAccount(signerKey);
@@ -156,10 +164,42 @@ describe("POST /paymaster/sponsor", () => {
     const policySource = new PolicySource({load: async () => policies});
     await policySource.reload();
 
+    const sponsorKeyGen = generateApiKey("test");
+    const viewerKeyGen = generateApiKey("test");
+    const revokedKeyGen = generateApiKey("test");
+    const expiredKeyGen = generateApiKey("test");
+    const pinnedKeyGen = generateApiKey("test");
+    sponsorKey = sponsorKeyGen.secret;
+    viewerKey = viewerKeyGen.secret;
+    revokedKey = revokedKeyGen.secret;
+    expiredKey = expiredKeyGen.secret;
+    pinnedKey = pinnedKeyGen.secret;
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const record = (gen: {hash: string; displayPrefix: string}, over: Partial<ApiKeyRecord>): ApiKeyRecord => ({
+      id: over.id ?? "k",
+      name: over.name ?? "key",
+      hash: gen.hash,
+      displayPrefix: gen.displayPrefix,
+      roles: over.roles ?? ["sponsor"],
+      policyId: over.policyId,
+      enabled: over.enabled ?? true,
+      createdAt: nowSec,
+      expiresAt: over.expiresAt,
+      lastUsedAt: undefined,
+    });
+
     const deps: AppDependencies = {
       chains: ChainRegistry.fromConfigs([chainConfig, {...chainConfig, chainId: 999_999, enabled: false}]),
       policies: policySource,
       signer: new LocalSponsorshipSigner(signerKey),
+      apiKeys: new InMemoryApiKeyStore([
+        record(sponsorKeyGen, {id: "sponsor", roles: ["sponsor"]}),
+        record(viewerKeyGen, {id: "viewer", roles: ["viewer"]}),
+        record(revokedKeyGen, {id: "revoked", roles: ["sponsor"], enabled: false}),
+        record(expiredKeyGen, {id: "expired", roles: ["sponsor"], expiresAt: nowSec - 1}),
+        record(pinnedKeyGen, {id: "pinned", roles: ["sponsor"], policyId: blockedPolicyId}),
+      ]),
       env,
     };
 
@@ -213,8 +253,16 @@ describe("POST /paymaster/sponsor", () => {
     };
   }
 
-  async function post(url: string, payload: unknown) {
-    return app.inject({method: "POST", url, payload: payload as object});
+  /** Sentinel for "send no Authorization header": passing `undefined` would select the default. */
+  const NO_KEY = Symbol("no key");
+
+  async function post(url: string, payload: unknown, key: string | typeof NO_KEY = sponsorKey) {
+    return app.inject({
+      method: "POST",
+      url,
+      payload: payload as object,
+      headers: key === NO_KEY ? {} : {authorization: `Bearer ${key as string}`},
+    });
   }
 
   it("returns a sponsorship for a valid request", async () => {
@@ -385,6 +433,78 @@ describe("POST /paymaster/sponsor", () => {
       const text = JSON.stringify(response.json());
       expect(text).not.toContain("sender-blocklist");
       expect(text).not.toContain("is blocked");
+    });
+  });
+
+  describe("auth", () => {
+    /** The regression this whole slice exists to prevent: an open endpoint that spends money. */
+    it("401s with no API key", async () => {
+      const response = await post("/paymaster/sponsor", requestBody(), NO_KEY);
+      expect(response.statusCode).toBe(401);
+    });
+
+    it("401s with an unknown key", async () => {
+      const response = await post("/paymaster/sponsor", requestBody(), generateApiKey("test").secret);
+      expect(response.statusCode).toBe(401);
+    });
+
+    it("401s with a malformed key", async () => {
+      expect((await post("/paymaster/sponsor", requestBody(), "garbage")).statusCode).toBe(401);
+    });
+
+    it("401s with a revoked key", async () => {
+      expect((await post("/paymaster/sponsor", requestBody(), revokedKey)).statusCode).toBe(401);
+    });
+
+    it("401s with an expired key", async () => {
+      expect((await post("/paymaster/sponsor", requestBody(), expiredKey)).statusCode).toBe(401);
+    });
+
+    /**
+     * Every authentication failure looks identical. Distinguishing revoked from unknown tells
+     * someone testing a leaked key whether it was ever real.
+     */
+    it("does not distinguish failure reasons to the caller", async () => {
+      const bodies = await Promise.all(
+        ([NO_KEY, generateApiKey("test").secret, revokedKey, expiredKey] as (string | typeof NO_KEY)[]).map(async (key) =>
+          JSON.stringify((await post("/paymaster/sponsor", requestBody(), key)).json()),
+        ),
+      );
+      expect(new Set(bodies).size, "all auth failures must return an identical body").toBe(1);
+    });
+
+    /** 403, not 401: authenticated but not permitted. Retrying with the same key will not help. */
+    it("403s for a key without sponsor:create", async () => {
+      const response = await post("/paymaster/sponsor", requestBody(), viewerKey);
+      expect(response.statusCode).toBe(403);
+      expect(response.json().message).toContain("sponsor:create");
+    });
+
+    it("accepts the key via X-API-Key as well as Bearer", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/paymaster/sponsor",
+        payload: requestBody() as object,
+        headers: {"x-api-key": sponsorKey},
+      });
+      expect(response.statusCode).toBe(201);
+    });
+
+    /**
+     * Privilege escalation: a key pinned to a restrictive policy must not be able to name a
+     * permissive one in the request body and escape its own quotas and allowlists.
+     */
+    it("ignores a body policyId when the key pins its own", async () => {
+      // The pinned key is scoped to the blocked policy, which denies this sender.
+      const response = await post("/paymaster/sponsor", requestBody({policyId: "default"}), pinnedKey);
+      expect(response.statusCode, "the key's policy must win over the body's").toBe(403);
+      expect(response.json().code).toBe("SENDER_BLOCKED");
+    });
+
+    it("never echoes the presented key back", async () => {
+      const key = generateApiKey("test").secret;
+      const response = await post("/paymaster/sponsor", requestBody(), key);
+      expect(JSON.stringify(response.json())).not.toContain(key.slice(8));
     });
   });
 

@@ -39,6 +39,18 @@ export const envSchema = z.object({
   PAYMASTER_VERIFICATION_GAS_LIMIT: z.coerce.bigint().default(300_000n),
   POSTOP_GAS_LIMIT: z.coerce.bigint().default(50_000n),
   DEFAULT_POLICY_ID: z.string().min(1).default("default"),
+
+  /**
+   * Seeds an admin API key at startup, solving the chicken-and-egg of a key-authenticated service
+   * with no keys. Only its hash is stored. Generate one with `npm run key:generate`.
+   *
+   * Optional, and its absence is safe: with no keys the store is empty and every request 401s. A
+   * paymaster that spends money should be unreachable when misconfigured, never open.
+   */
+  BOOTSTRAP_API_KEY: z
+    .string()
+    .regex(/^pm_(live|test)_[A-Za-z0-9_-]{40,}$/, "must be a well-formed API key")
+    .optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
