@@ -26,3 +26,7 @@ node_modules/
 dist/
 coverage/
 lcov.info
+
+# Bundler binary: a 56MB per-platform release artifact, fetched by `npm run bundler:fetch`
+# with a pinned version and checksum.
+backend/.bundler/

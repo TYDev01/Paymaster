@@ -69,6 +69,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The bundler integration test needs postgres, redis and the rundler binary. Without them
+      # those suites skip rather than fail, so fetch them explicitly — a silently-skipped
+      # integration test is worse than no integration test.
+      - name: Install PostgreSQL and Redis
+        run: sudo apt-get update && sudo apt-get install -y postgresql redis-server
+
+      - name: Fetch bundler (pinned version + checksum)
+        run: npm run bundler:fetch --workspace @paymaster/backend
+
       - name: Typecheck
         run: npm run typecheck --workspaces --if-present
 

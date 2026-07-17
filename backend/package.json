@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "dev": "tsx watch src/main.ts",
     "start": "tsx src/main.ts",
-    "key:generate": "tsx src/cli/generateKey.ts"
+    "key:generate": "tsx src/cli/generateKey.ts",
+    "bundler:fetch": "bash scripts/fetch-bundler.sh"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.28",

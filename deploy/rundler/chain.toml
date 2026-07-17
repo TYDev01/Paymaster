@@ -1,0 +1,26 @@
+# Rundler chain spec for the local development chain.
+#
+# Only needed because anvil's EntryPoint is deployed at whatever address the deployer lands on,
+# rather than the canonical one. For a real chain, delete this file and set NETWORK=base (or
+# ethereum, arbitrum, optimism, polygon) instead — rundler already knows the canonical v0.7
+# EntryPoint address, which is identical on every chain.
+#
+# entry_point_address_v0_7 below must match the EntryPoint the backend's CHAINS config points at.
+# A mismatch is silent: the backend signs attestations bound to one EntryPoint while the bundler
+# submits to another, and every sponsorship fails with an opaque AA34.
+
+base = "ethereum"
+
+name = "Local Devnet"
+id = 31337
+
+# Set by deploy/local-setup.sh after deploying the EntryPoint. The canonical v0.7 address is
+# 0x0000000071727De22E5E9d8BAf0edAc6f37da032 — that is what a real chain uses.
+entry_point_address_v0_7 = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
+
+bundle_max_send_interval_millis = 250
+block_gas_limit = 30000000
+
+# Local chain: no MEV relay, and no 7702 on anvil's default hardfork.
+flashbots_enabled = false
+eip7702_enabled = false
