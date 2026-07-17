@@ -84,5 +84,5 @@ export async function startPostgres(): Promise<TestPostgres> {
 
 /** Empties every table, so tests do not depend on each other's rows. */
 export async function truncateAll(pool: DatabasePool): Promise<void> {
-  await pool.query("TRUNCATE sponsorships, audit_logs, api_keys RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE policy_rules, sponsorships, audit_logs, api_keys, policies RESTART IDENTITY CASCADE");
 }

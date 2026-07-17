@@ -5,7 +5,12 @@ import {hashApiKey} from "../auth/apiKey.js";
 import {createPool, type DatabasePool} from "../db/pool.js";
 import {migrate} from "../db/migrate.js";
 import {PostgresApiKeyStore} from "../db/postgresApiKeyStore.js";
+import {PostgresPolicyRepository} from "../db/postgresPolicyRepository.js";
 import {SponsorshipRepository} from "../db/sponsorshipRepository.js";
+import {AuditLogRepository} from "../db/auditLogRepository.js";
+import {PolicyFactory} from "../policy/policyFactory.js";
+import {AdminController, ADMIN_SERVICE} from "./admin/admin.controller.js";
+import {AdminService} from "./admin/admin.service.js";
 import {ApiKeyAuthenticator} from "../auth/authenticator.js";
 import type {ApiKeyStore} from "../auth/apiKeyStore.js";
 import {InMemoryApiKeyStore} from "../auth/inMemoryApiKeyStore.js";
@@ -30,6 +35,9 @@ export interface AppDependencies {
   readonly apiKeys: ApiKeyStore;
   /** Records what we committed to pay. Absent when running without a database. */
   readonly sponsorships?: SponsorshipRepository | undefined;
+  /** Policy definitions. Absent when running without a database, which disables admin writes. */
+  readonly policyRepository?: PostgresPolicyRepository | undefined;
+  readonly audit?: AuditLogRepository | undefined;
   /** Held so bootstrap can close it on shutdown. */
   readonly pool?: DatabasePool | undefined;
   /** Held so bootstrap can close it on shutdown. Undefined when running without Redis. */
@@ -65,12 +73,21 @@ export class AppModule {
 
     const healthDeps: HealthDeps = {chains: deps.chains, policies: deps.policies};
 
+    const adminService = new AdminService({
+      policies: deps.policyRepository,
+      policySource: deps.policies,
+      apiKeys: deps.apiKeys,
+      sponsorships: deps.sponsorships,
+      audit: deps.audit,
+    });
+
     return {
       module: AppModule,
-      controllers: [SponsorController, HealthController],
+      controllers: [SponsorController, HealthController, AdminController],
       providers: [
         {provide: SPONSOR_SERVICE, useValue: sponsorService},
         {provide: HEALTH_DEPS, useValue: healthDeps},
+        {provide: ADMIN_SERVICE, useValue: adminService},
         {provide: API_KEY_AUTHENTICATOR, useValue: new ApiKeyAuthenticator(deps.apiKeys)},
       ],
     };
@@ -92,11 +109,6 @@ export async function buildDependencies(
   const redis = env.REDIS_URL === undefined ? undefined : new IORedis(env.REDIS_URL, {maxRetriesPerRequest: 3});
   const quotas: QuotaStore = redis === undefined ? new InMemoryQuotaStore() : new RedisQuotaStore(redis);
 
-  const policies = makePolicies(quotas);
-  const repository: PolicyRepository = {load: async () => policies};
-  const policySource = new PolicySource(repository);
-  await policySource.reload();
-
   const pool =
     env.DATABASE_URL === undefined
       ? undefined
@@ -110,12 +122,26 @@ export async function buildDependencies(
     await ensureBootstrapKey(pool, env.BOOTSTRAP_API_KEY);
   }
 
+  /**
+   * With a database, policies come from it and hot reload means something. Without one, the
+   * in-code bootstrap set is served and `reload()` re-reads the same array — structurally present,
+   * functionally a no-op. That is a real limitation, and `bootstrap` says so.
+   */
+  const policyRepository =
+    pool === undefined ? undefined : new PostgresPolicyRepository(pool, new PolicyFactory(quotas));
+
+  const repository: PolicyRepository = policyRepository ?? {load: async () => makePolicies(quotas)};
+  const policySource = new PolicySource(repository);
+  await policySource.reload();
+
   return {
     chains,
     policies: policySource,
     signer: new LocalSponsorshipSigner(env.SPONSORSHIP_SIGNER_KEY),
     apiKeys: pool === undefined ? buildApiKeyStore(env) : new PostgresApiKeyStore(pool),
     sponsorships: pool === undefined ? undefined : new SponsorshipRepository(pool),
+    policyRepository,
+    audit: pool === undefined ? undefined : new AuditLogRepository(pool),
     pool,
     redis,
     quotasAreLocal: redis === undefined,

@@ -31,6 +31,33 @@ describe("database", () => {
     await truncateAll(pg.pool);
   });
 
+  describe("api_keys.policy_id foreign key", () => {
+    /**
+     * A key pinned to a policy that does not exist could never sponsor anything — every request
+     * would fail as an unknown policy. Rejecting at creation turns a silent dead key into an
+     * immediate error.
+     */
+    it("refuses a key pinned to a policy that does not exist", async () => {
+      const store = new PostgresApiKeyStore(pg.pool);
+      const {record} = keyRecord({policyId: "ghost"});
+      await expect(store.create(record)).rejects.toThrow(/foreign key constraint/);
+    });
+
+    /**
+     * The escalation this prevents: an unpinned key may name any policy in the request body, so
+     * silently unpinning keys on delete would hand every one of them a free upgrade.
+     */
+    it("refuses to delete a policy a key is pinned to", async () => {
+      await pg.pool.query("INSERT INTO policies (id, name) VALUES ('pinned', 'pinned')");
+      const store = new PostgresApiKeyStore(pg.pool);
+      await store.create(keyRecord({policyId: "pinned"}).record);
+
+      await expect(pg.pool.query("DELETE FROM policies WHERE id = 'pinned'")).rejects.toThrow(
+        /foreign key constraint/,
+      );
+    });
+  });
+
   function keyRecord(over: Partial<ApiKeyRecord> = {}): {record: ApiKeyRecord; secret: string} {
     const generated = generateApiKey("test");
     return {
@@ -89,8 +116,10 @@ describe("database", () => {
       // Whichever ran first found nothing pending; none may error or double-apply.
       for (const result of results) expect(result.applied).toEqual([]);
 
+      // Derived from the files, not hardcoded: a new migration must not break this test.
+      const expected = (await loadMigrations()).length;
       const {rows} = await pg.pool.query<{count: string}>("SELECT count(*)::text AS count FROM schema_migrations");
-      expect(rows[0]!.count).toBe("1");
+      expect(rows[0]!.count, "each migration must be applied exactly once").toBe(String(expected));
     });
 
     it("releases the advisory lock", async () => {
@@ -245,6 +274,8 @@ describe("database", () => {
   describe("PostgresApiKeyStore", () => {
     it("round-trips a key", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
+      // The policy must exist first: api_keys.policy_id is a foreign key as of 0002.
+      await pg.pool.query("INSERT INTO policies (id, name) VALUES ('restricted', 'restricted')");
       const {record, secret} = keyRecord({policyId: "restricted", expiresAt: NOW + 3_600});
       await store.create(record);
 

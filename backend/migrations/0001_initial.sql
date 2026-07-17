@@ -36,8 +36,8 @@ CREATE TABLE api_keys (
     roles           TEXT[] NOT NULL CHECK (array_length(roles, 1) >= 1),
 
     -- The policy this key's sponsorships are evaluated against. NULL means the request may name
-    -- one. FK is deliberately absent: policies are reloaded as a set and a key referencing a
-    -- policy that has not loaded yet should fail at evaluation, not block the key's creation.
+    -- one. No FK here because the `policies` table does not exist yet; 0002 adds both the table
+    -- and the constraint.
     policy_id       TEXT,
 
     enabled         BOOLEAN NOT NULL DEFAULT true,

@@ -5,6 +5,9 @@ import type {FastifyReply} from "fastify";
 import {ChainDisabledError, UnknownChainError} from "../../chain/chainRegistry.js";
 import {UnknownPolicyError} from "../../policy/policySource.js";
 import {InvalidSponsorshipRequestError} from "../../signature/signatureEngine.js";
+import {InvalidRuleConfigError} from "../../policy/policyFactory.js";
+import {PolicyNotFoundError} from "../../db/postgresPolicyRepository.js";
+import {AdminUnavailableError, PolicyInUseError} from "../admin/admin.service.js";
 import {SponsorshipDeniedError} from "../sponsor/sponsor.service.js";
 
 /**
@@ -72,6 +75,37 @@ export class DomainErrorFilter implements ExceptionFilter {
       return {
         status: HttpStatus.BAD_REQUEST,
         body: {error: "INVALID_REQUEST", message: exception.message},
+        logLevel: "warn",
+      };
+    }
+
+    if (exception instanceof PolicyNotFoundError) {
+      return {status: HttpStatus.NOT_FOUND, body: {error: "NOT_FOUND", message: exception.message}, logLevel: "warn"};
+    }
+
+    /**
+     * A bad rule config is the operator's typo, not our failure. Reporting it as 500 would page
+     * someone for a malformed request — and the message names the policy and rule, which is what
+     * makes the mistake fixable. This is safe to disclose: admin routes require policy:write, so
+     * the caller already knows the policy set.
+     */
+    if (exception instanceof InvalidRuleConfigError) {
+      return {
+        status: HttpStatus.BAD_REQUEST,
+        body: {error: "INVALID_POLICY_CONFIG", message: exception.message},
+        logLevel: "warn",
+      };
+    }
+
+    // 409: the request is well-formed and the operator may resolve the conflict by unpinning keys.
+    if (exception instanceof PolicyInUseError) {
+      return {status: HttpStatus.CONFLICT, body: {error: "POLICY_IN_USE", message: exception.message}, logLevel: "warn"};
+    }
+
+    if (exception instanceof AdminUnavailableError) {
+      return {
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        body: {error: "ADMIN_UNAVAILABLE", message: exception.message},
         logLevel: "warn",
       };
     }
