@@ -1,0 +1,396 @@
+openapi: 3.1.0
+info:
+  title: Self-Hosted Paymaster API
+  version: 0.1.0
+  description: |
+    Sponsorship, admin, and health API for the self-hosted ERC-4337 (EntryPoint v0.7) paymaster.
+
+    All quantities cross the wire as **hex or decimal strings**, never JSON numbers: fee and gas
+    fields routinely exceed 2^53 and a JSON number would lose precision.
+
+    Authentication is a bearer API key (`Authorization: Bearer pm_live_...`, or `X-API-Key`). Every
+    authentication failure returns an identical `401` with no indication of which check failed.
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: http://localhost:3000
+    description: Local development
+
+security:
+  - ApiKey: []
+
+tags:
+  - name: sponsorship
+    description: Public sponsorship endpoint.
+  - name: admin
+    description: Policy, key, and reporting management. Requires elevated permissions.
+  - name: health
+    description: Liveness and readiness probes.
+
+paths:
+  /paymaster/sponsor:
+    post:
+      tags: [sponsorship]
+      summary: Sponsor a UserOperation
+      description: |
+        Evaluates the configured policy and, if allowed, returns a signed `paymasterAndData` binding
+        the paymaster to this exact operation for a validity window. The operation must already carry
+        its gas limits — the sponsorship is priced from them, and a sponsorship over different limits
+        than are finally submitted is rejected on-chain.
+
+        Requires the `sponsor:create` permission.
+      operationId: sponsor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SponsorRequest" }
+      responses:
+        "201":
+          description: Sponsorship issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SponsorResponse" }
+        "400":
+          description: Malformed request, unknown chain, or unknown policy
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Authenticated but not permitted, or policy denied sponsorship
+          content: { application/json: { schema: { $ref: "#/components/schemas/DenialError" } } }
+        "429":
+          description: A quota or spend cap is exhausted (retryable)
+          content: { application/json: { schema: { $ref: "#/components/schemas/DenialError" } } }
+        "503":
+          description: The requested chain is configured but disabled
+
+  /health/live:
+    get:
+      tags: [health]
+      summary: Liveness
+      description: The process is running. Checks nothing external; safe for a restart probe.
+      security: []
+      operationId: live
+      responses:
+        "200":
+          description: Alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { status: { const: ok } }
+
+  /health/ready:
+    get:
+      tags: [health]
+      summary: Readiness
+      description: |
+        Whether the service can serve a sponsorship right now (policies loaded, at least one chain
+        reachable). Returns `503` when not ready, without killing the process — for a load-balancer
+        probe, not a restart probe.
+      security: []
+      operationId: ready
+      responses:
+        "200": { description: Ready, content: { application/json: { schema: { $ref: "#/components/schemas/Readiness" } } } }
+        "503": { description: Not ready, content: { application/json: { schema: { $ref: "#/components/schemas/Readiness" } } } }
+
+  /admin/policies:
+    get:
+      tags: [admin]
+      summary: List policies
+      description: Requires `policy:read`.
+      operationId: listPolicies
+      responses:
+        "200":
+          description: Policies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  policies: { type: array, items: { $ref: "#/components/schemas/Policy" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [admin]
+      summary: Create or replace a policy, then hot-reload
+      description: |
+        Upserts a policy and reloads immediately, so the change is live without a restart. A rule
+        config that cannot build a working rule is rejected (`400`) and nothing is written.
+        Requires `policy:write`.
+      operationId: upsertPolicy
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/Policy" } } }
+      responses:
+        "201": { description: Upserted, content: { application/json: { schema: { $ref: "#/components/schemas/Policy" } } } }
+        "400": { description: Invalid rule config, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/policies/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [admin]
+      summary: Get a policy
+      description: Requires `policy:read`.
+      operationId: getPolicy
+      responses:
+        "200": { description: Policy, content: { application/json: { schema: { $ref: "#/components/schemas/Policy" } } } }
+        "404": { description: Not found }
+    delete:
+      tags: [admin]
+      summary: Delete a policy
+      description: |
+        Fails with `409` if an API key is pinned to the policy — deleting it would unpin those keys.
+        Requires `policy:write`.
+      operationId: deletePolicy
+      responses:
+        "204": { description: Deleted }
+        "404": { description: Not found }
+        "409": { description: Policy still referenced by an API key }
+
+  /admin/policies/reload:
+    post:
+      tags: [admin]
+      summary: Reload the policy set on demand
+      description: Requires `policy:write`.
+      operationId: reloadPolicies
+      responses:
+        "200":
+          description: Reloaded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer }
+                  generation: { type: integer }
+
+  /admin/keys:
+    get:
+      tags: [admin]
+      summary: List API keys (never returns secrets)
+      description: Requires `key:read`.
+      operationId: listKeys
+      responses:
+        "200":
+          description: Keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys: { type: array, items: { $ref: "#/components/schemas/ApiKeyView" } }
+    post:
+      tags: [admin]
+      summary: Mint an API key (returns the secret exactly once)
+      description: The only response that ever contains a key secret. Requires `key:write`.
+      operationId: createKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, roles]
+              properties:
+                name: { type: string }
+                roles: { type: array, items: { enum: [sponsor, viewer, admin] } }
+                policyId: { type: string }
+                environment: { enum: [live, test], default: live }
+                expiresAt: { type: integer, description: Unix seconds }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/ApiKeyView" }
+                  - type: object
+                    properties:
+                      secret: { type: string, description: Shown once; not recoverable }
+                      warning: { type: string }
+
+  /admin/keys/{id}:
+    delete:
+      tags: [admin]
+      summary: Revoke an API key
+      description: Revocation is a flag, not a delete — history survives. Requires `key:write`.
+      operationId: revokeKey
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Revoked }
+        "404": { description: No active key with that id }
+
+  /admin/sponsorships:
+    get:
+      tags: [admin]
+      summary: List issued attestations
+      description: |
+        These are **commitments, not spend** — most never execute on-chain, so summing them
+        overstates cost. Requires `metrics:read`.
+      operationId: listSponsorships
+      parameters:
+        - { name: apiKeyId, in: query, schema: { type: string } }
+        - { name: chainId, in: query, schema: { type: integer } }
+        - { name: sender, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, maximum: 1000 } }
+      responses:
+        "200": { description: Attestations }
+
+  /admin/audit:
+    get:
+      tags: [admin]
+      summary: List audit-log entries
+      description: Append-only; credential values are redacted at write time. Requires `metrics:read`.
+      operationId: listAudit
+      parameters:
+        - { name: actor, in: query, schema: { type: string } }
+        - { name: action, in: query, schema: { type: string } }
+        - { name: since, in: query, schema: { type: integer, description: Unix seconds } }
+        - { name: limit, in: query, schema: { type: integer, maximum: 1000 } }
+      responses:
+        "200": { description: Entries }
+
+components:
+  securitySchemes:
+    ApiKey:
+      type: http
+      scheme: bearer
+      description: "Authorization: Bearer pm_live_...  (or the X-API-Key header)"
+
+  responses:
+    Unauthorized:
+      description: Invalid or missing API key (uniform for all auth failures)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  schemas:
+    Quantity:
+      type: string
+      description: A uint256 as a hex (0x...) or decimal string. Never a JSON number.
+      examples: ["0x4a817c800", "20000000000"]
+    Address:
+      type: string
+      pattern: "^0x[0-9a-fA-F]{40}$"
+    Hex:
+      type: string
+      pattern: "^0x[0-9a-fA-F]*$"
+
+    SponsorRequest:
+      type: object
+      required: [chainId, userOperation]
+      properties:
+        chainId: { type: integer }
+        policyId:
+          type: string
+          description: Ignored when the API key pins its own policy.
+        userOperation:
+          type: object
+          required: [sender, nonce, callData, callGasLimit, verificationGasLimit, preVerificationGas, maxFeePerGas, maxPriorityFeePerGas]
+          properties:
+            sender: { $ref: "#/components/schemas/Address" }
+            nonce: { $ref: "#/components/schemas/Quantity" }
+            factory: { $ref: "#/components/schemas/Address" }
+            factoryData: { $ref: "#/components/schemas/Hex" }
+            callData: { $ref: "#/components/schemas/Hex" }
+            callGasLimit: { $ref: "#/components/schemas/Quantity" }
+            verificationGasLimit: { $ref: "#/components/schemas/Quantity" }
+            preVerificationGas: { $ref: "#/components/schemas/Quantity" }
+            maxFeePerGas: { $ref: "#/components/schemas/Quantity" }
+            maxPriorityFeePerGas: { $ref: "#/components/schemas/Quantity" }
+            signature: { $ref: "#/components/schemas/Hex" }
+
+    SponsorResponse:
+      type: object
+      description: |
+        The v0.7 unpacked paymaster fields to put on the operation. `paymasterAndData` is the same
+        bytes concatenated, for v0.6-shaped clients. The paymaster's signature is the tail of
+        paymasterData — it is deliberately not returned as a separate field.
+      properties:
+        paymaster: { $ref: "#/components/schemas/Address" }
+        paymasterVerificationGasLimit: { $ref: "#/components/schemas/Hex" }
+        paymasterPostOpGasLimit: { $ref: "#/components/schemas/Hex" }
+        paymasterData: { $ref: "#/components/schemas/Hex" }
+        paymasterAndData: { $ref: "#/components/schemas/Hex" }
+        validUntil: { type: integer, description: Unix seconds }
+        validAfter: { type: integer, description: Unix seconds }
+        expiresAt: { type: string, format: date-time }
+        metadata:
+          type: object
+          properties:
+            chainId: { type: integer }
+            policyId: { type: string }
+            signer: { $ref: "#/components/schemas/Address" }
+            maxCost: { type: string, description: "Worst-case cost committed, in wei" }
+            entryPoint: { $ref: "#/components/schemas/Address" }
+
+    Policy:
+      type: object
+      required: [id, name, rules]
+      properties:
+        id: { type: string, pattern: "^[a-zA-Z0-9._:-]{1,128}$" }
+        name: { type: string }
+        description: { type: string }
+        enabled: { type: boolean, default: true }
+        rules:
+          type: array
+          items:
+            type: object
+            required: [ruleType]
+            properties:
+              ruleType:
+                enum: [chain-enabled, sender-allowlist, sender-blocklist, target-allowlist, method-allowlist, no-value-transfer, quota]
+              config:
+                type: object
+                description: Shape depends on ruleType; validated server-side per type.
+
+    ApiKeyView:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        displayPrefix: { type: string }
+        roles: { type: array, items: { type: string } }
+        policyId: { type: string }
+        enabled: { type: boolean }
+        createdAt: { type: integer }
+        expiresAt: { type: integer }
+        lastUsedAt: { type: integer }
+
+    Readiness:
+      type: object
+      properties:
+        status: { enum: [ready, not_ready] }
+        policies:
+          type: object
+          properties:
+            loaded: { type: boolean }
+            generation: { type: integer }
+        chains:
+          type: array
+          items:
+            type: object
+            properties:
+              chainId: { type: integer }
+              healthy: { type: boolean }
+              blockNumber: { type: string }
+              latencyMs: { type: integer }
+              error: { type: string }
+
+    Error:
+      type: object
+      properties:
+        error: { type: string, description: Stable machine-readable code }
+        message: { type: string }
+
+    DenialError:
+      type: object
+      description: A policy denial. Carries the stable code, never the internal reason.
+      properties:
+        error: { const: SPONSORSHIP_DENIED }
+        code:
+          enum: [CHAIN_DISABLED, SENDER_NOT_ALLOWED, SENDER_BLOCKED, TARGET_NOT_ALLOWED, METHOD_NOT_ALLOWED, CALLDATA_UNDECODABLE, QUOTA_EXCEEDED, SPEND_CAP_EXCEEDED, VALUE_NOT_ALLOWED, RULE_ERROR]
