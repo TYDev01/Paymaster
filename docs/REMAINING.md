@@ -4,18 +4,40 @@ Status of what is left to implement, measured against [td.md](../td.md) and [td2
 Every item here has been flagged during the build; nothing is aspirational filler. Items are grouped
 by whether they **block production**, are **spec-required but non-blocking**, or are **hardening**.
 
-Legend: 🔴 blocks production · 🟡 spec-required, not blocking · 🟢 hardening / nice-to-have
+Legend: 🔴 blocks production · 🟡 spec-required, not blocking · 🟢 hardening / nice-to-have ·
+✅ done this pass
+
+---
+
+## Completed this pass
+
+- ✅ **KMS-backed signer** — `KmsSponsorshipSigner` over a `KmsClient` port, with an `AwsKmsClient`
+  adapter. The key never enters the process; DER→`r‖s‖v` conversion, low-`s` normalisation and `v`
+  recovery are done in-process and proven bit-for-bit identical to the local signer.
+- ✅ **Deposit / stake monitor + alerting** — `FundingMonitor` polls every chain's funding on a
+  timer and edge-triggers alerts (`Alerter` port, `LoggingAlerter` default) before sponsorship fails.
+- ✅ **Spend-cap reconciliation loop** — `SpendReconciler` reads `UserOperationEvent`s, correlates by
+  `(chainId, sender, nonce)`, and trues the exact quota counters up to actual on-chain cost.
+- ✅ **Token-ownership policy rule** — `TokenOwnershipRule` (`network` cost), registered in
+  `policyFactory.ts`, fail-closed, with per-chain token addresses.
+- ✅ **Backend `/metrics`** — a Prometheus endpoint and the core metric set (decisions, denials by
+  rule, sponsorships, gas committed, chain health, deposit/stake).
+- ✅ **ESLint + Prettier + coverage tooling** — flat-config ESLint, Prettier, `vitest --coverage`,
+  wired into CI. Coverage numbers are deliberately not cited until the full suite is run.
+
+The four items above that block production are struck through below; the rest of each section is the
+work that remains.
 
 ---
 
 ## Blocks production
 
-### 🔴 KMS-backed signer
-The sponsorship signing key is held in process heap memory (`LocalSponsorshipSigner`), reachable from
-a core dump. The `SponsorshipSigner` port is already shaped for this — a KMS/HSM adapter is an
-additive change, not a refactor.
-- **Where:** `backend/src/signature/signer.ts` (port exists), needs a new `KmsSponsorshipSigner`.
-- **Done when:** the signer key never enters the Node process; signing is a KMS API call.
+### ✅ KMS-backed signer — DONE
+The signing key no longer has to live in process heap: setting `SPONSORSHIP_SIGNER_KMS_KEY_ID` selects
+`KmsSponsorshipSigner`, which signs via a KMS API call and never sees key material.
+- **Added:** `backend/src/signature/kmsSigner.ts` (`KmsClient` port + signer), `awsKmsClient.ts`
+  (AWS adapter, dynamic-imported optional dep), wired in `app.module.ts`; env enforces exactly one of
+  the local key or the KMS key. Tested in `test/kmsSigner.test.ts`.
 
 ### 🔴 Docker Compose stack verified end-to-end
 `docker-compose.yml` parses (`docker compose config` is clean) and every component runs outside
@@ -23,43 +45,55 @@ Docker, but the composed stack has **never been booted** — no Docker daemon in
 - **Done when:** `docker compose up` brings up postgres+redis+anvil+bundler+backend and the SDK
   example sponsors an op against it. Needs the images to build and the healthchecks to pass.
 
-### 🔴 Deposit / stake monitor + low-balance alerting
-`ChainAdapter.getPaymasterFunding()` can read deposit and stake against configured thresholds, but
-nothing calls it on a timer or alerts. A drained deposit silently stops all sponsorship; an
-under-staked paymaster is silently unbundleable.
-- **Where:** new background service consuming `ChainAdapter`; wire to alerting.
-- **Done when:** deposit/stake below threshold fires an alert before sponsorship fails.
+### ✅ Deposit / stake monitor + low-balance alerting — DONE
+`FundingMonitor` (`backend/src/monitoring/fundingMonitor.ts`) polls every chain's funding on a timer,
+edge-triggers alerts through the `Alerter` port (deposit = critical, stake = warning, unreadable =
+critical), and feeds the deposit/stake metrics. Runs as a `BackgroundService` tied to the app
+lifecycle. Tested in `test/fundingMonitor.test.ts`.
 
-### 🔴 Spend-cap reconciliation loop
-Spend caps charge worst-case `maxCost`, not actual gas cost (which is always lower — proven in
-`maxCost.test.ts`). Caps therefore run conservative and drift the longer they run.
-- **Where:** new loop reading `UserOperationEvent` from each chain, correlating by
-  `(chainId, sender, nonce)` to the `sponsorships` table, truing up Redis counters.
-- **Done when:** spend counters reflect actual on-chain cost, not the worst-case reservation.
+### ✅ Spend-cap reconciliation loop — DONE
+`SpendReconciler` (`backend/src/reconciliation/spendReconciler.ts`) reads each chain's settled
+`UserOperationEvent`s, atomically claims the matching `sponsorships` row (migration 0003 adds the
+columns + checkpoint table), and calls `QuotaRule.trueUp` to refund the over-reservation into the
+exact counter/window that charged it. Every ambiguity biases conservative. Tested in
+`test/spendReconciler.test.ts`. Note the wallet/chain/global/apiKey caps reconcile; per-IP and
+per-target spend caps stay conservative because a sponsorship row does not record IP or target.
 
 ---
 
 ## Spec-required, not yet done
 
-### 🟡 JWT admin authentication
-td.md lists "JWT admin auth" explicitly. Today admin auth is API-key + RBAC only. JWT would add
-short-lived operator sessions distinct from long-lived integration keys.
+### ✅ JWT admin authentication — DONE
+`JwtService` (`backend/src/auth/jwt.ts`) mints and verifies short-lived HS256 session tokens
+(`node:crypto`, no library — so the security-critical parts, rejecting `alg:none` and constant-time
+signature checks, are readable in full). `POST /admin/auth/token` (`auth.controller.ts`) exchanges an
+API key for a session carrying the caller's OWN roles — never an escalation. `ApiKeyGuard` now
+accepts either credential, disambiguated by shape (a `pm_*` key vs a JWT). Enabled by
+`ADMIN_JWT_SECRET`; disabled cleanly (endpoint 503s) when unset. Tested in `test/jwt.test.ts`.
 
-### 🟡 Token-ownership policy rule
-td.md lists "token ownership requirements". The `network` cost tier and the chain adapter both exist
-for it; the rule itself was never written. It needs an on-chain `balanceOf` read during evaluation.
-- **Where:** new rule in `backend/src/policy/rules/`, registered in `policyFactory.ts`.
+### ✅ Token-ownership policy rule — DONE
+`TokenOwnershipRule` (`backend/src/policy/rules/tokenOwnership.ts`) reads `balanceOf` via a
+`TokenBalanceReader` port (`ChainRegistryTokenBalanceReader` over the real chains), gates sponsorship
+on an ERC-20/721 holding, and fails closed. Registered in `policyFactory.ts` with a `token-ownership`
+schema (single token or per-chain map, minimum balance). Tested in `test/policyFactory.test.ts`.
 
-### 🟡 Kubernetes / Helm
-td2.md asks for Kubernetes/Helm for production. Nothing exists. The backend is stateless (state in
-Postgres+Redis) so this is charts + config, not app changes. Migrations already serialise across
-replicas via a Postgres advisory lock.
+### ✅ Kubernetes / Helm — DONE
+A chart at `deploy/helm/paymaster` (Deployment, Service, ConfigMap, optional Secret, HPA, PDB,
+ServiceMonitor, Ingress, ServiceAccount). The backend's statelessness shows through: it is a plain
+Deployment with no init ordering, because migrations self-serialise via the advisory lock. Liveness
+(`/health/live`) and readiness (`/health/ready`) are separate so an RPC outage sheds traffic without
+restart-looping; the root filesystem is read-only with an in-memory `/tmp`; secrets are bring-your-own
+by default (chart-managed only for dev). Rendered YAML is documented in `deploy/helm/paymaster/README.md`.
+Not linted here — `helm` is not installed in this environment — so run `helm lint` / `helm template`
+before first use.
 
-### 🟡 Monitoring stack (Prometheus / Grafana / OpenTelemetry)
-td.md lists all three. The bundler (rundler) already exports Prometheus metrics; the **backend
-exports none**. Needs: a `/metrics` endpoint, the metrics td.md enumerates (gas sponsored, failed
-sponsorships, success rate, latency, chain/RPC health, deposit/stake), Grafana dashboards, OTel
-tracing, and the alert rules (low deposit, RPC failure, high error rate, attack detection).
+### 🟡 Monitoring stack (Prometheus / Grafana / OpenTelemetry) — PARTIAL
+The **backend now exports `/metrics`** (`backend/src/monitoring/metrics.ts` +
+`paymasterMetrics.ts`, controller at `metrics.controller.ts`): policy decisions, denials by rule,
+sponsorships by outcome, gas committed, chain health, and deposit/stake — td.md's list. An `Alerter`
+port exists and the funding monitor already raises low-deposit / RPC-unreadable alerts through it.
+Still to do: Grafana dashboards, OpenTelemetry tracing, and the remaining alert *rules* (high error
+rate, attack detection) plus a real pager sink behind `Alerter` (only `LoggingAlerter` ships).
 
 ### 🟡 Remaining Redis uses
 Redis currently backs quotas only. td.md also lists: nonce cache, policy cache, temporary-signature
@@ -80,20 +114,31 @@ model), and [backend/openapi.yaml](../backend/openapi.yaml) exist. Still to writ
 
 ## Hardening / quality
 
-### 🟢 ESLint + Prettier
-td.md requires both. `forge fmt` covers Solidity. TypeScript has **no linter or formatter config** —
-only `tsc` strictness. Add flat-config ESLint + Prettier and a CI check.
+### ✅ ESLint + Prettier — DONE
+Flat-config ESLint (`eslint.config.js`, typescript-eslint recommended + prettier compat) and Prettier
+(`.prettierrc.json`, tuned to the house style; prose left alone) are in place, with root `lint` /
+`format` / `format:check` scripts and CI steps in `.github/workflows/test.yml`. The whole tree passes
+both.
 
-### 🟢 Measure test coverage
-td.md targets 95%+. Coverage has **never been measured**. Do not cite a number that has not been
-produced. Add `vitest --coverage` + `forge coverage` and report real figures before claiming any.
+### 🟡 Measure test coverage — TOOLING ADDED
+`test:coverage` (`vitest run --coverage`, `@vitest/coverage-v8`) is wired in both workspaces. A real
+project-wide figure still needs the full suite — including the Postgres/Redis/anvil/rundler-backed
+tests — to run, so **no number is cited here**. `forge coverage` for contracts is still to add.
 
-### 🟢 Additional security controls (td.md list)
-- Request signing (HMAC over request bodies)
-- Circuit breakers (per-chain, on repeated RPC failure)
-- Pre-authentication IP throttling — the per-IP quota runs *after* auth, so it does not protect the
-  auth path itself
-- Redis-backed abuse/attack detection distinct from quotas
+### ✅ Additional security controls (td.md list) — DONE
+All four, under `backend/src/security/` (tested in `test/{circuitBreaker,ipThrottle,requestSignature}.test.ts`):
+- **Request signing** — `RequestSignatureVerifier` checks an HMAC-SHA256 over
+  `timestamp\nMETHOD\npath\nrawBody` with a freshness window bounding replay; enforced at the Fastify
+  edge (`securityPlugin.ts`) on mutating requests when `REQUEST_SIGNING_SECRET` is set. Uses Nest's
+  `rawBody` so it verifies the exact bytes, not a re-serialisation.
+- **Circuit breakers** — a per-chain `CircuitBreaker` wraps every RPC read in `ChainAdapter`; after a
+  run of failures it fast-fails for a cooldown (and `health` reports the chain unhealthy without a
+  call), opening/closing through the shared `Alerter` and a `paymaster_chain_circuit_open` gauge.
+- **Pre-authentication IP throttling** — an `onRequest` Fastify hook runs the `IpThrottle` before any
+  auth code, so a flood is cut off ahead of the credential check the per-IP policy quota sits behind.
+- **Redis-backed abuse detection** — `IpThrottle` counts auth failures per IP (fed by `ApiKeyGuard`)
+  in the shared quota store and blocks an IP past a threshold for the rest of the window, alerting
+  once on the transition. Distinct from quotas: it shares the store, not the counters.
 
 ### 🟢 Load / fuzz / forked-chain tests
 td.md lists load testing, property-based tests, fuzz testing, forked-chain tests. Contracts have

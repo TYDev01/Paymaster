@@ -18,64 +18,158 @@ const hex32 = z
   .regex(/^0x[0-9a-fA-F]{64}$/, "must be a 32-byte hex string")
   .transform((v) => v as Hex);
 
-export const envSchema = z.object({
-  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-  PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
-  HOST: z.string().default("0.0.0.0"),
+export const envSchema = z
+  .object({
+    NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+    PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
+    HOST: z.string().default("0.0.0.0"),
 
-  /**
-   * The sponsorship signing key.
-   *
-   * No default, and never logged. This is the development path; in production this variable should
-   * be absent and a KMS-backed signer configured instead — see SponsorshipSigner. Holding the key
-   * in process memory is a deliberate development convenience, not a production posture.
-   */
-  SPONSORSHIP_SIGNER_KEY: hex32,
+    /**
+     * The sponsorship signing key, for the local (in-process) signer.
+     *
+     * No default, and never logged. This is the development path; in production leave it unset and set
+     * SPONSORSHIP_SIGNER_KMS_KEY_ID instead, so the key never enters this process. Exactly one of the
+     * two must be set — enforced below.
+     */
+    SPONSORSHIP_SIGNER_KEY: hex32.optional(),
 
-  /** Chains, as JSON. Parsed and validated by `parseChainsJson`. */
-  CHAINS: z.string().min(1),
+    /**
+     * KMS key id/ARN for the KMS-backed signer. When set, the signer key never enters this process:
+     * signing is a KMS API call. The key must be an asymmetric ECC_SECG_P256K1 SIGN_VERIFY key.
+     * Requires the @aws-sdk/client-kms package (an optional dependency).
+     */
+    SPONSORSHIP_SIGNER_KMS_KEY_ID: z.string().min(1).optional(),
+    /** AWS region for KMS. Optional; the AWS SDK also resolves it from the standard environment. */
+    AWS_REGION: z.string().min(1).optional(),
 
-  /**
-   * PostgreSQL connection string.
-   *
-   * Optional. Without it the service runs on in-memory stores: correct for a single process, but
-   * API keys vanish on restart and sponsorship records are not kept. Required for anything
-   * multi-replica or auditable — `bootstrap` warns when it is absent.
-   */
-  DATABASE_URL: z.string().url().optional(),
-  DATABASE_MAX_CONNECTIONS: z.coerce.number().int().min(1).max(100).default(10),
-  /** Run pending migrations at startup. See migrate() for why this is safe under rolling deploys. */
-  DATABASE_MIGRATE_ON_BOOT: z
+    /** Chains, as JSON. Parsed and validated by `parseChainsJson`. */
+    CHAINS: z.string().min(1),
+
+    /**
+     * PostgreSQL connection string.
+     *
+     * Optional. Without it the service runs on in-memory stores: correct for a single process, but
+     * API keys vanish on restart and sponsorship records are not kept. Required for anything
+     * multi-replica or auditable — `bootstrap` warns when it is absent.
+     */
+    DATABASE_URL: z.string().url().optional(),
+    DATABASE_MAX_CONNECTIONS: z.coerce.number().int().min(1).max(100).default(10),
+    /** Run pending migrations at startup. See migrate() for why this is safe under rolling deploys. */
+    DATABASE_MIGRATE_ON_BOOT: z
+      .string()
+      .default("true")
+      .transform((v) => v !== "false"),
+
+    /**
+     * Redis connection string.
+     *
+     * Optional, and its absence is a real limitation rather than a nicety: without it quota counters
+     * live in process memory, so N replicas give every caller N times their quota. Required for any
+     * horizontally scaled deployment — `bootstrap` warns when it is missing.
+     */
+    REDIS_URL: z.string().url().optional(),
+
+    SPONSORSHIP_VALIDITY_SECONDS: z.coerce.number().int().min(30).max(3600).default(300),
+    PAYMASTER_VERIFICATION_GAS_LIMIT: z.coerce.bigint().default(300_000n),
+    POSTOP_GAS_LIMIT: z.coerce.bigint().default(50_000n),
+    DEFAULT_POLICY_ID: z.string().min(1).default("default"),
+
+    /**
+     * Seeds an admin API key at startup, solving the chicken-and-egg of a key-authenticated service
+     * with no keys. Only its hash is stored. Generate one with `npm run key:generate`.
+     *
+     * Optional, and its absence is safe: with no keys the store is empty and every request 401s. A
+     * paymaster that spends money should be unreachable when misconfigured, never open.
+     */
+    BOOTSTRAP_API_KEY: z
+      .string()
+      .regex(/^pm_(live|test)_[A-Za-z0-9_-]{40,}$/, "must be a well-formed API key")
+      .optional(),
+
+    /**
+     * Deposit / stake monitor.
+     *
+     * Polls every chain's paymaster funding against its configured thresholds and alerts before
+     * sponsorship silently fails. On by default: a paymaster that spends money should watch its own
+     * balance unless an operator deliberately turns it off.
+     */
+    FUNDING_MONITOR_ENABLED: boolFromEnv(true),
+    FUNDING_MONITOR_INTERVAL_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(60_000),
+    /** How long an unresolved low-funding alert waits before re-firing. */
+    FUNDING_MONITOR_REALERT_MS: z.coerce.number().int().min(60_000).max(86_400_000).default(3_600_000),
+
+    /**
+     * Spend-cap reconciliation loop.
+     *
+     * Trues spend counters up to actual on-chain cost. Requires a database (it correlates events to
+     * the sponsorships table); enabled by default but a no-op without DATABASE_URL.
+     */
+    RECONCILER_ENABLED: boolFromEnv(true),
+    RECONCILER_INTERVAL_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(60_000),
+    /** Blocks to stay behind head, so a reorg does not reconcile against an orphaned event. */
+    RECONCILER_CONFIRMATIONS: z.coerce.number().int().min(0).max(1_000).default(5),
+    /** Cap on blocks scanned per chain per tick, to bound a single eth_getLogs span. */
+    RECONCILER_MAX_BLOCK_RANGE: z.coerce.number().int().min(1).max(1_000_000).default(2_000),
+    /** How far back to start when a chain has no checkpoint yet. */
+    RECONCILER_INITIAL_LOOKBACK_BLOCKS: z.coerce.number().int().min(0).max(10_000_000).default(5_000),
+
+    /** Expose Prometheus metrics at /metrics. On by default; the endpoint carries no secrets. */
+    METRICS_ENABLED: boolFromEnv(true),
+
+    /**
+     * HMAC secret for operator session tokens (JWT admin auth). Optional: when unset, only API keys
+     * authenticate and POST /admin/auth/token returns 503. At least 32 chars — a short HMAC secret
+     * is a weak one. Never logged.
+     */
+    ADMIN_JWT_SECRET: z.string().min(32, "must be at least 32 characters").optional(),
+    /** Session token lifetime. Short by default: a session is a convenience, not a second API key. */
+    ADMIN_JWT_TTL_SECONDS: z.coerce.number().int().min(60).max(86_400).default(900),
+    ADMIN_JWT_ISSUER: z.string().min(1).default("paymaster"),
+    ADMIN_JWT_AUDIENCE: z.string().min(1).default("paymaster-admin"),
+
+    /**
+     * Pre-authentication IP throttling and abuse detection. Runs before auth, so it protects the
+     * auth path the per-IP policy quota cannot. On by default; backed by the same store as quotas
+     * (Redis in production), so limits hold across replicas.
+     */
+    IP_THROTTLE_ENABLED: boolFromEnv(true),
+    IP_THROTTLE_REQUESTS_PER_WINDOW: z.coerce.number().int().min(1).max(1_000_000).default(100),
+    IP_THROTTLE_WINDOW_SECONDS: z.coerce.number().int().min(1).max(3_600).default(60),
+    /** Auth failures per IP within the block window that trip a temporary block. */
+    IP_ABUSE_AUTH_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(100_000).default(20),
+    IP_ABUSE_BLOCK_WINDOW_SECONDS: z.coerce.number().int().min(1).max(86_400).default(900),
+
+    /**
+     * HMAC request signing. When REQUEST_SIGNING_SECRET is set, mutating requests must carry a valid
+     * X-Signature + X-Timestamp over the raw body. Optional; at least 32 chars. Never logged.
+     */
+    REQUEST_SIGNING_SECRET: z.string().min(32, "must be at least 32 characters").optional(),
+    /** Freshness window for a signed request's timestamp, bounding replay. */
+    REQUEST_SIGNING_MAX_SKEW_SECONDS: z.coerce.number().int().min(5).max(3_600).default(300),
+  })
+  .superRefine((env, ctx) => {
+    // Exactly one signer source. Zero means the service cannot sign at all; both is ambiguous — which
+    // key attests? — and an ambiguous signing configuration in a component that spends money is a
+    // misconfiguration to reject at startup, not resolve by precedence.
+    const sources = [env.SPONSORSHIP_SIGNER_KEY, env.SPONSORSHIP_SIGNER_KMS_KEY_ID].filter((v) => v !== undefined);
+    if (sources.length !== 1) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "set exactly one of SPONSORSHIP_SIGNER_KEY (local) or SPONSORSHIP_SIGNER_KMS_KEY_ID (KMS); " +
+          `found ${sources.length}`,
+        path: ["SPONSORSHIP_SIGNER_KEY"],
+      });
+    }
+  });
+
+/** Parses an env flag: unset falls back to `defaultValue`; "false"/"0"/"no" are false, else true. */
+function boolFromEnv(defaultValue: boolean) {
+  return z
     .string()
-    .default("true")
-    .transform((v) => v !== "false"),
-
-  /**
-   * Redis connection string.
-   *
-   * Optional, and its absence is a real limitation rather than a nicety: without it quota counters
-   * live in process memory, so N replicas give every caller N times their quota. Required for any
-   * horizontally scaled deployment — `bootstrap` warns when it is missing.
-   */
-  REDIS_URL: z.string().url().optional(),
-
-  SPONSORSHIP_VALIDITY_SECONDS: z.coerce.number().int().min(30).max(3600).default(300),
-  PAYMASTER_VERIFICATION_GAS_LIMIT: z.coerce.bigint().default(300_000n),
-  POSTOP_GAS_LIMIT: z.coerce.bigint().default(50_000n),
-  DEFAULT_POLICY_ID: z.string().min(1).default("default"),
-
-  /**
-   * Seeds an admin API key at startup, solving the chicken-and-egg of a key-authenticated service
-   * with no keys. Only its hash is stored. Generate one with `npm run key:generate`.
-   *
-   * Optional, and its absence is safe: with no keys the store is empty and every request 401s. A
-   * paymaster that spends money should be unreachable when misconfigured, never open.
-   */
-  BOOTSTRAP_API_KEY: z
-    .string()
-    .regex(/^pm_(live|test)_[A-Za-z0-9_-]{40,}$/, "must be a well-formed API key")
-    .optional(),
-});
+    .optional()
+    .transform((v) => (v === undefined ? defaultValue : !["false", "0", "no", "off"].includes(v.toLowerCase())));
+}
 
 export type Env = z.infer<typeof envSchema>;
 

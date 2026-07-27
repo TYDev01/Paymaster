@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Optional,
   SetMetadata,
   UnauthorizedException,
   type CanActivate,
@@ -11,10 +12,17 @@ import {
 import {Reflector} from "@nestjs/core";
 import type {FastifyRequest} from "fastify";
 
+import {isWellFormedApiKey} from "../../auth/apiKey.js";
 import {extractApiKey, type ApiKeyAuthenticator, type Principal} from "../../auth/authenticator.js";
-import type {Permission} from "../../auth/permissions.js";
+import type {JwtService} from "../../auth/jwt.js";
+import {permissionsFor, type Permission} from "../../auth/permissions.js";
+import type {IpThrottle} from "../../security/ipThrottle.js";
 
 export const API_KEY_AUTHENTICATOR = Symbol("API_KEY_AUTHENTICATOR");
+/** Optional JWT verifier. Present only when ADMIN_JWT_SECRET is configured. */
+export const JWT_VERIFIER = Symbol("JWT_VERIFIER");
+/** Optional IP throttle. Present only when pre-auth throttling is configured; fed auth failures. */
+export const SECURITY_IP_THROTTLE = Symbol("SECURITY_IP_THROTTLE");
 
 const PERMISSIONS_KEY = "required_permissions";
 
@@ -25,8 +33,7 @@ const PERMISSIONS_KEY = "required_permissions";
  * the guard is applied per-controller rather than globally with opt-out. Forgetting to opt in
  * leaves an endpoint unprotected; forgetting to opt out only breaks it loudly.
  */
-export const RequirePermissions = (...permissions: readonly Permission[]) =>
-  SetMetadata(PERMISSIONS_KEY, permissions);
+export const RequirePermissions = (...permissions: readonly Permission[]) => SetMetadata(PERMISSIONS_KEY, permissions);
 
 /** Injects the authenticated caller into a handler parameter. */
 export const CurrentPrincipal = createParamDecorator((_data: unknown, context: ExecutionContext): Principal => {
@@ -58,18 +65,22 @@ export class ApiKeyGuard implements CanActivate {
     // Explicitly injected: with emitDecoratorMetadata off, Nest cannot infer even its own
     // Reflector from the type annotation alone.
     @Inject(Reflector) private readonly reflector: Reflector,
+    // Optional: only present when JWT auth is configured. When absent, only API keys authenticate.
+    @Optional() @Inject(JWT_VERIFIER) private readonly jwt: JwtService | null = null,
+    // Optional: only present when pre-auth throttling is configured. Auth failures feed abuse
+    // detection so a credential-stuffing run from one IP is blocked after a threshold.
+    @Optional() @Inject(SECURITY_IP_THROTTLE) private readonly ipThrottle: IpThrottle | null = null,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
 
-    const result = await this.authenticator.authenticate(
-      extractApiKey(request.headers),
-      Math.floor(Date.now() / 1000),
-    );
-
-    if (!result.ok) {
-      throw new UnauthorizedException({error: "UNAUTHORIZED", message: "invalid or missing API key"});
+    const principal = await this.#resolvePrincipal(request);
+    if (principal === undefined) {
+      // Record the failure for abuse detection BEFORE responding. Best-effort: a throttle-store
+      // blip must not convert an auth failure into a 500.
+      await this.ipThrottle?.recordAuthFailure(request.ip, Math.floor(Date.now() / 1000)).catch(() => undefined);
+      throw new UnauthorizedException({error: "UNAUTHORIZED", message: "invalid or missing credentials"});
     }
 
     const required =
@@ -78,18 +89,47 @@ export class ApiKeyGuard implements CanActivate {
         context.getClass(),
       ]) ?? [];
 
-    const missing = required.filter((permission) => !result.principal.permissions.has(permission));
+    const missing = required.filter((permission) => !principal.permissions.has(permission));
     if (missing.length > 0) {
-      // 403, not 401: the caller IS authenticated and retrying with the same key will not help.
-      // Naming the missing permission is safe and saves an integrator a support ticket — it
-      // describes their own key, not the policy set.
+      // 403, not 401: the caller IS authenticated and retrying with the same credential will not
+      // help. Naming the missing permission is safe and saves an integrator a support ticket — it
+      // describes their own credential, not the policy set.
       throw new ForbiddenException({
         error: "FORBIDDEN",
         message: `missing required permission: ${missing.join(", ")}`,
       });
     }
 
-    request.principal = result.principal;
+    request.principal = principal;
     return true;
+  }
+
+  /**
+   * Resolves a caller from either a session JWT or an API key.
+   *
+   * The two are disambiguated by shape, not by trying both: an API key has a fixed `pm_(live|test)_`
+   * form, so a presented credential that is NOT a well-formed key is treated as a JWT (when JWT auth
+   * is configured). This avoids sending a session token through the key store, and sending a key
+   * through the JWT verifier — each credential reaches exactly its own path. Either way an invalid
+   * credential resolves to `undefined`, which the caller turns into a uniform 401.
+   */
+  async #resolvePrincipal(request: AuthenticatedRequest): Promise<Principal | undefined> {
+    const presented = extractApiKey(request.headers);
+    const now = Math.floor(Date.now() / 1000);
+
+    if (presented !== undefined && this.jwt !== null && !isWellFormedApiKey(presented)) {
+      const verified = this.jwt.verify(presented, now);
+      if (!verified.ok) return undefined;
+      return {
+        apiKeyId: verified.claims.sub,
+        name: verified.claims.name,
+        roles: verified.claims.roles,
+        permissions: permissionsFor(verified.claims.roles),
+        policyId: verified.claims.policyId,
+      };
+    }
+
+    const result = await this.authenticator.authenticate(presented, now);
+    return result.ok ? result.principal : undefined;
   }
 }

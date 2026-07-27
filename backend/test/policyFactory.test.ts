@@ -5,12 +5,18 @@ import {packUint128Pair, type PackedUserOperation} from "../src/domain/userOpera
 import type {PolicyContext} from "../src/policy/context.js";
 import {InvalidRuleConfigError, PolicyFactory, RULE_TYPES, isRuleType} from "../src/policy/policyFactory.js";
 import {InMemoryQuotaStore} from "../src/policy/quota/inMemoryQuotaStore.js";
+import type {TokenBalanceReader} from "../src/policy/rules/tokenOwnership.js";
 
 const SENDER = "0x1234567890123456789012345678901234567890" as Address;
 const USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" as Address;
 
+/** A reader that reports a fixed balance, so factory tests never touch a chain. */
+function reader(balance = 0n): TokenBalanceReader {
+  return {balanceOf: async () => balance};
+}
+
 function factory(): PolicyFactory {
-  return new PolicyFactory(new InMemoryQuotaStore());
+  return new PolicyFactory(new InMemoryQuotaStore(), reader());
 }
 
 function context(over: Partial<PolicyContext> = {}): PolicyContext {
@@ -47,6 +53,7 @@ describe("PolicyFactory", () => {
       "target-allowlist": {addresses: [USDC]},
       "method-allowlist": {selectors: ["0x095ea7b3"]},
       "no-value-transfer": {},
+      "token-ownership": {token: USDC, minBalance: "1"},
       quota: {name: "q", subject: "wallet", unit: "operations", limit: "10", windowSeconds: 86_400},
     };
 
@@ -184,5 +191,83 @@ describe("PolicyFactory", () => {
   it("isRuleType recognises exactly the declared types", () => {
     for (const t of RULE_TYPES) expect(isRuleType(t)).toBe(true);
     expect(isRuleType("nonsense")).toBe(false);
+  });
+
+  describe("token-ownership", () => {
+    it("refuses to build without a token reader, rather than silently dropping the rule", () => {
+      const noReader = new PolicyFactory(new InMemoryQuotaStore());
+      expect(() => noReader.build("p", {ruleType: "token-ownership", config: {token: USDC}})).toThrow(
+        /TokenBalanceReader/,
+      );
+    });
+
+    it("requires at least one token address", () => {
+      expect(() => factory().build("p", {ruleType: "token-ownership", config: {}})).toThrow(InvalidRuleConfigError);
+      expect(() => factory().build("p", {ruleType: "token-ownership", config: {minBalance: "1"}})).toThrow(/token/i);
+    });
+
+    it("rejects a non-positive minimum balance", () => {
+      expect(() => factory().build("p", {ruleType: "token-ownership", config: {token: USDC, minBalance: "0"}})).toThrow(
+        InvalidRuleConfigError,
+      );
+    });
+
+    it("rejects a mistyped token address via its checksum", () => {
+      const bad = "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eB48";
+      expect(() => factory().build("p", {ruleType: "token-ownership", config: {token: bad}})).toThrow(/checksum/i);
+    });
+
+    it("allows a sender whose balance meets the minimum", async () => {
+      const f = new PolicyFactory(new InMemoryQuotaStore(), reader(5n));
+      const rule = f.build("p", {ruleType: "token-ownership", config: {token: USDC, minBalance: "5"}});
+      expect((await rule.evaluate(context())).allowed).toBe(true);
+    });
+
+    it("denies a sender below the minimum with TOKEN_BALANCE_INSUFFICIENT", async () => {
+      const f = new PolicyFactory(new InMemoryQuotaStore(), reader(4n));
+      const rule = f.build("p", {ruleType: "token-ownership", config: {token: USDC, minBalance: "5"}});
+      expect(await rule.evaluate(context())).toMatchObject({allowed: false, code: "TOKEN_BALANCE_INSUFFICIENT"});
+    });
+
+    it("fails closed when the balance read throws", async () => {
+      const throwing: TokenBalanceReader = {
+        balanceOf: async () => {
+          throw new Error("rpc down");
+        },
+      };
+      const rule = new PolicyFactory(new InMemoryQuotaStore(), throwing).build("p", {
+        ruleType: "token-ownership",
+        config: {token: USDC},
+      });
+      expect(await rule.evaluate(context())).toMatchObject({allowed: false, code: "RULE_ERROR"});
+    });
+
+    it("fails closed on a chain with no configured token", async () => {
+      // tokenByChain lists only chain 10; the context is on chain 8453, which has no fallback.
+      const rule = factory().build("p", {
+        ruleType: "token-ownership",
+        config: {tokenByChain: {"10": USDC}},
+      });
+      expect(await rule.evaluate(context({chainId: 8453}))).toMatchObject({
+        allowed: false,
+        code: "TOKEN_BALANCE_INSUFFICIENT",
+      });
+    });
+
+    it("reads the per-chain token address for the operation's chain", async () => {
+      const seen: {chainId: number; token: Address}[] = [];
+      const recording: TokenBalanceReader = {
+        balanceOf: async (chainId, token) => {
+          seen.push({chainId, token});
+          return 1n;
+        },
+      };
+      const rule = new PolicyFactory(new InMemoryQuotaStore(), recording).build("p", {
+        ruleType: "token-ownership",
+        config: {tokenByChain: {"8453": USDC, "10": SENDER}},
+      });
+      await rule.evaluate(context({chainId: 8453}));
+      expect(seen).toEqual([{chainId: 8453, token: USDC}]);
+    });
   });
 });

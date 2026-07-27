@@ -282,8 +282,7 @@ describeBundler("paymaster <-> rundler (real bundler)", () => {
     const {rpcOp} = await buildSponsoredOp(paymaster, nonce, maxFee);
 
     // Flip the last byte of the paymaster's signature tail.
-    const forgedData = (rpcOp.paymasterData.slice(0, -2) +
-      (rpcOp.paymasterData.endsWith("00") ? "01" : "00")) as Hex;
+    const forgedData = (rpcOp.paymasterData.slice(0, -2) + (rpcOp.paymasterData.endsWith("00") ? "01" : "00")) as Hex;
 
     // Re-sign the account over the tampered operation, so the ONLY invalid thing is ours.
     const forgedPacked: PackedUserOperation = {
@@ -294,7 +293,8 @@ describeBundler("paymaster <-> rundler (real bundler)", () => {
       accountGasLimits: toHex(packUint128Pair(VERIFICATION_GAS, CALL_GAS), {size: 32}),
       preVerificationGas: PRE_VERIFICATION_GAS,
       gasFees: toHex(packUint128Pair(1_000_000_000n, maxFee), {size: 32}),
-      paymasterAndData: `${paymaster}${toHex(PM_VERIFICATION_GAS, {size: 16}).slice(2)}${toHex(POSTOP_GAS, {size: 16}).slice(2)}${forgedData.slice(2)}` as Hex,
+      paymasterAndData:
+        `${paymaster}${toHex(PM_VERIFICATION_GAS, {size: 16}).slice(2)}${toHex(POSTOP_GAS, {size: 16}).slice(2)}${forgedData.slice(2)}` as Hex,
       signature: "0x",
     };
     const forgedHash = (await anvil.publicClient.readContract({
@@ -323,10 +323,28 @@ describeBundler("paymaster <-> rundler (real bundler)", () => {
 
   it("estimates gas through the bundler", async () => {
     const {rpcOp} = await buildSponsoredOp(paymaster, await currentNonce(), await viableMaxFee());
-    const {sender, nonce, callData, paymaster: pm, paymasterData, paymasterVerificationGasLimit, paymasterPostOpGasLimit, signature} = rpcOp;
+    const {
+      sender,
+      nonce,
+      callData,
+      paymaster: pm,
+      paymasterData,
+      paymasterVerificationGasLimit,
+      paymasterPostOpGasLimit,
+      signature,
+    } = rpcOp;
 
     const estimate = await bundlerRpc<Record<string, Hex>>(bundler.rpcUrl, "eth_estimateUserOperationGas", [
-      {sender, nonce, callData, paymaster: pm, paymasterData, paymasterVerificationGasLimit, paymasterPostOpGasLimit, signature},
+      {
+        sender,
+        nonce,
+        callData,
+        paymaster: pm,
+        paymasterData,
+        paymasterVerificationGasLimit,
+        paymasterPostOpGasLimit,
+        signature,
+      },
       entryPoint,
     ]);
 

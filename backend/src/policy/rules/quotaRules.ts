@@ -1,6 +1,34 @@
-import {ALLOW, deny, type PolicyContext, type PolicyDecision} from "../context.js";
+import type {Address} from "viem";
+
+import {ALLOW, deny, type DecodedCall, type PolicyContext, type PolicyDecision} from "../context.js";
 import type {ReservingRule} from "../rule.js";
 import type {QuotaStore} from "../quota/quotaStore.js";
+
+/**
+ * The request fields a quota keys on — the subset of `PolicyContext` that determines the counter
+ * key. `PolicyContext` satisfies this structurally, so evaluation passes itself; the reconciler
+ * builds one from a stored sponsorship, which is why this is a named type rather than inline.
+ */
+export interface QuotaSubjectFields {
+  readonly chainId: number;
+  readonly sender: Address;
+  readonly clientIp: string | undefined;
+  readonly apiKeyId: string | undefined;
+  readonly calls: readonly DecodedCall[] | undefined;
+}
+
+/** A reservation to reconcile against its realised cost. See `QuotaRule.trueUp`. */
+export interface SpendTrueUp {
+  readonly chainId: number;
+  readonly sender: Address;
+  readonly apiKeyId: string | undefined;
+  /** What was reserved at sponsorship time (worst-case). */
+  readonly reservedMaxCostWei: bigint;
+  /** What the operation actually cost on-chain (`actualGasCost` from UserOperationEvent). */
+  readonly actualCostWei: bigint;
+  /** Unix seconds of the original reservation, so the refund lands in the window it charged. */
+  readonly reservedAt: number;
+}
 
 /** What the quota is counted against. */
 export type QuotaSubject = "wallet" | "ip" | "apiKey" | "chain" | "target" | "global";
@@ -145,26 +173,75 @@ export class QuotaRule implements ReservingRule {
    * The counter key. Namespaced by rule name so two quotas on the same subject — say a daily and
    * an hourly wallet cap — do not share a counter.
    */
-  #keyFor(context: PolicyContext): string | undefined {
+  #keyFor(fields: QuotaSubjectFields): string | undefined {
     const prefix = `quota:${this.name}`;
     switch (this.#options.subject) {
       case "wallet":
-        return `${prefix}:${context.chainId}:${context.sender.toLowerCase()}`;
+        return `${prefix}:${fields.chainId}:${fields.sender.toLowerCase()}`;
       case "chain":
-        return `${prefix}:${context.chainId}`;
+        return `${prefix}:${fields.chainId}`;
       case "global":
         return prefix;
       case "ip":
-        return context.clientIp === undefined ? undefined : `${prefix}:${context.clientIp}`;
+        return fields.clientIp === undefined ? undefined : `${prefix}:${fields.clientIp}`;
       case "apiKey":
-        return context.apiKeyId === undefined ? undefined : `${prefix}:${context.apiKeyId}`;
+        return fields.apiKeyId === undefined ? undefined : `${prefix}:${fields.apiKeyId}`;
       case "target": {
         // A batch hitting several contracts has no single target to key on. Counting it against
         // each target would let one operation consume several budgets and make release ambiguous,
         // so a per-target quota only applies to single-call operations.
-        if (context.calls === undefined || context.calls.length !== 1) return undefined;
-        return `${prefix}:${context.chainId}:${context.calls[0]!.target.toLowerCase()}`;
+        if (fields.calls === undefined || fields.calls.length !== 1) return undefined;
+        return `${prefix}:${fields.chainId}:${fields.calls[0]!.target.toLowerCase()}`;
       }
     }
   }
+
+  /**
+   * Trues a worst-case reservation up to the operation's realised cost, refunding the difference.
+   *
+   * A spend cap reserves `maxCost` at sponsorship time because actual cost is unknowable until the
+   * op executes; actual cost is always lower, so without this a cap runs conservative and drifts.
+   * The reconciler feeds each on-chain `UserOperationEvent` here to release the over-reservation.
+   *
+   * Returns the wei refunded (0 if nothing to do). It is a no-op — returning 0 — when:
+   *   * this is not a wei (spend) quota; operation counts are exact and have nothing to true up;
+   *   * the subject keys on request data not recorded in a sponsorship (a per-IP or per-target
+   *     spend cap): the counter cannot be located, so those stay conservative. This is the
+   *     documented limitation, not a silent one.
+   *
+   * The refund is applied against `reservedAt`, so it lands in the same fixed window the
+   * reservation charged; if that window has already rolled the release simply finds nothing, which
+   * is correct — a refund to a window that reset would corrupt the current one.
+   */
+  async trueUp(reservation: SpendTrueUp): Promise<bigint> {
+    if (this.#options.unit !== "wei") return 0n;
+
+    const key = this.#keyFor({
+      chainId: reservation.chainId,
+      sender: reservation.sender,
+      apiKeyId: reservation.apiKeyId,
+      clientIp: undefined,
+      calls: undefined,
+    });
+    if (key === undefined) return 0n;
+
+    // Both reservation and actual were/are charged rounded UP to the next gwei; the delta is the
+    // difference of the two rounded values, so it matches the counting the reservation used.
+    const reservedGwei = ceilDivGwei(reservation.reservedMaxCostWei);
+    const actualGwei = ceilDivGwei(reservation.actualCostWei);
+    const deltaGwei = reservedGwei - actualGwei;
+    if (deltaGwei <= 0n) return 0n; // Actual met or exceeded worst case (should not happen); charge stands.
+
+    await this.#store.release({
+      key,
+      amount: deltaGwei,
+      windowSeconds: this.#options.windowSeconds,
+      now: reservation.reservedAt,
+    });
+    return deltaGwei * WEI_PER_GWEI;
+  }
+}
+
+function ceilDivGwei(wei: bigint): bigint {
+  return (wei + WEI_PER_GWEI - 1n) / WEI_PER_GWEI;
 }

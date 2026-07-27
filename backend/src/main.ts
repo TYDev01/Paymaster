@@ -8,6 +8,7 @@ import {AppModule, buildDependencies} from "./api/app.module.js";
 import {DomainErrorFilter} from "./api/filters/domainError.filter.js";
 import {parseEnv} from "./config/env.js";
 import {defaultPolicies} from "./config/defaultPolicies.js";
+import {registerSecurity} from "./security/securityPlugin.js";
 
 /**
  * Fastify rather than Express: td.md targets thousands of operations per minute, and this service
@@ -44,6 +45,16 @@ export async function bootstrap(): Promise<NestFastifyApplication> {
   const app = await NestFactory.create<NestFastifyApplication>(AppModule.forRoot(deps), new FastifyAdapter(), {
     // JSON only; nothing here serves a browser directly.
     cors: false,
+    // Capture the raw request body so HMAC request signing can verify the exact bytes received,
+    // not a re-serialisation that might differ from what the client signed.
+    rawBody: true,
+  });
+
+  // Edge security BEFORE authentication: pre-auth IP throttle/abuse block, and HMAC signature
+  // verification. Registered on the underlying Fastify instance so it runs ahead of Nest guards.
+  registerSecurity(app.getHttpAdapter().getInstance(), {
+    ipThrottle: deps.ipThrottle,
+    signatureVerifier: deps.signatureVerifier,
   });
 
   app.useGlobalFilters(new DomainErrorFilter());
@@ -61,7 +72,6 @@ export async function bootstrap(): Promise<NestFastifyApplication> {
 // Only run when executed directly, so tests can import bootstrap without starting a server.
 if (process.argv[1] !== undefined && import.meta.url.endsWith(process.argv[1].replace(/^.*[/\\]/, ""))) {
   bootstrap().catch((error: unknown) => {
-    // eslint-disable-next-line no-console -- the logger may not exist yet if config parsing failed
     console.error(error instanceof Error ? error.message : error);
     process.exit(1);
   });

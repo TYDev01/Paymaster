@@ -129,7 +129,12 @@ describe("signature engine <-> VerifyingPaymaster differential", () => {
       {name: "max preVerificationGas", op: baseOp({preVerificationGas: 2n ** 256n - 1n}), validUntil: 1, validAfter: 0},
       {name: "both timestamps set", op: baseOp(), validUntil: 1_800_000_000, validAfter: 1_700_000_000},
       {name: "max uint48 window", op: baseOp(), validUntil: 281_474_976_710_655, validAfter: 0},
-      {name: "long callData", op: baseOp({callData: `0x${"ab".repeat(1000)}`}), validUntil: 1_800_000_000, validAfter: 0},
+      {
+        name: "long callData",
+        op: baseOp({callData: `0x${"ab".repeat(1000)}`}),
+        validUntil: 1_800_000_000,
+        validAfter: 0,
+      },
     ];
 
     for (const {name, op, validUntil, validAfter} of cases) {

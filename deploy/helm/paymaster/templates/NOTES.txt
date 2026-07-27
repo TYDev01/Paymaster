@@ -1,0 +1,25 @@
+{{ include "paymaster.fullname" . }} deployed.
+
+Replicas:        {{ if .Values.autoscaling.enabled }}{{ .Values.autoscaling.minReplicas }}–{{ .Values.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.replicaCount }}{{ end }}
+Image:           {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+Secret source:   {{ if .Values.secrets.existingSecret }}existing ({{ .Values.secrets.existingSecret }}){{ else if .Values.secrets.create }}chart-managed (DEV ONLY — plaintext in release history){{ else }}NONE{{ end }}
+
+{{- if not .Values.config.chains }}
+
+WARNING: config.chains is empty. The backend requires CHAINS and will crash-loop until it is set.
+         Provide it with --set-file config.chains=chains.json or in values.
+{{- end }}
+
+{{- if and (not .Values.secrets.existingSecret) (not .Values.secrets.create) }}
+
+WARNING: no secret configured. The backend needs DATABASE_URL, a signer (SPONSORSHIP_SIGNER_KEY or
+         SPONSORSHIP_SIGNER_KMS_KEY_ID), and BOOTSTRAP_API_KEY. Set secrets.existingSecret to a
+         Secret you manage, or secrets.create=true with inline values for a throwaway environment.
+{{- end }}
+
+Reach the API from inside the cluster:
+
+  kubectl port-forward svc/{{ include "paymaster.fullname" . }} 8080:{{ .Values.service.port }}
+  curl localhost:8080/health/ready
+
+Metrics are at /metrics{{ if not .Values.serviceMonitor.enabled }} (enable serviceMonitor.enabled to scrape via Prometheus Operator){{ end }}.

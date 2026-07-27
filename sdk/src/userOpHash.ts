@@ -86,11 +86,10 @@ export function getUserOperationHash(op: UserOperation, entryPoint: Address, cha
   );
 
   return keccak256(
-    encodeAbiParameters([{type: "bytes32"}, {type: "address"}, {type: "uint256"}], [
-      inner,
-      entryPoint,
-      BigInt(chainId),
-    ]),
+    encodeAbiParameters(
+      [{type: "bytes32"}, {type: "address"}, {type: "uint256"}],
+      [inner, entryPoint, BigInt(chainId)],
+    ),
   );
 }
 

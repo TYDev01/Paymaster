@@ -92,7 +92,12 @@ function safeJson(text: string): unknown {
 }
 
 /** A JSON-RPC 2.0 call, for the bundler. */
-export async function jsonRpc<T>(url: string, method: string, params: unknown[], options: TransportOptions): Promise<T> {
+export async function jsonRpc<T>(
+  url: string,
+  method: string,
+  params: unknown[],
+  options: TransportOptions,
+): Promise<T> {
   const {parsed} = (await post(url, {jsonrpc: "2.0", id: 1, method, params}, options)) as {parsed: unknown};
   const body = parsed as {result?: T; error?: {code: number; message: string; data?: unknown}} | undefined;
 
@@ -106,11 +111,7 @@ export async function jsonRpc<T>(url: string, method: string, params: unknown[],
 }
 
 /** A REST-shaped POST/GET, for the sponsorship and admin API. */
-export async function httpApi<T>(
-  url: string,
-  body: unknown,
-  options: TransportOptions,
-): Promise<T> {
+export async function httpApi<T>(url: string, body: unknown, options: TransportOptions): Promise<T> {
   const {response, parsed} = (await post(url, body, options)) as {response: Response; parsed: unknown};
 
   if (!response.ok) {

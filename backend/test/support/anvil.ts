@@ -32,10 +32,7 @@ export function loadArtifact(sol: string, name: string): Artifact {
   try {
     return JSON.parse(readFileSync(path, "utf8")) as Artifact;
   } catch (cause) {
-    throw new Error(
-      `Could not read artifact ${name} at ${path}. Run \`forge build\` in contracts/ first.`,
-      {cause},
-    );
+    throw new Error(`Could not read artifact ${name} at ${path}. Run \`forge build\` in contracts/ first.`, {cause});
   }
 }
 

@@ -1,0 +1,16 @@
+apiVersion: v2
+name: paymaster
+description: >-
+  Self-hosted ERC-4337 sponsorship backend (paymaster). Stateless API in front of PostgreSQL and
+  Redis; migrations serialise across replicas via a Postgres advisory lock, so this deploys as an
+  ordinary horizontally scaled Deployment with no init ordering to arrange.
+type: application
+# Chart version. Bump on any template change.
+version: 0.1.0
+# The app version tracks the backend image, overridable via image.tag.
+appVersion: "0.1.0"
+kubeVersion: ">=1.23.0-0"
+sources:
+  - https://github.com/your-org/paymaster
+maintainers:
+  - name: platform

@@ -48,30 +48,31 @@ const uint128 = quantity.refine((value) => value <= (1n << 128n) - 1n, {
   message: "must fit in uint128",
 });
 
-export const sponsorRequestSchema = z.object({
-  chainId: z.number().int().positive(),
-  userOperation: z.object({
-    sender: address,
-    nonce: quantity,
-    /** Account-deployment fields. Both present or both absent. */
-    factory: address.optional(),
-    factoryData: hexString.optional(),
-    callData: hexString,
-    callGasLimit: uint128,
-    verificationGasLimit: uint128,
-    preVerificationGas: quantity,
-    maxFeePerGas: uint128,
-    maxPriorityFeePerGas: uint128,
-    /**
-     * The account's signature. Optional: a client estimating gas has not signed yet, and the
-     * paymaster's attestation does not cover it anyway — the account signature is over a hash
-     * that includes our paymasterAndData, so it cannot exist until after we respond.
-     */
-    signature: hexString.optional(),
-  }),
-  /** Which policy to evaluate against. Resolved from the API key in production. */
-  policyId: z.string().min(1).max(128).optional(),
-})
+export const sponsorRequestSchema = z
+  .object({
+    chainId: z.number().int().positive(),
+    userOperation: z.object({
+      sender: address,
+      nonce: quantity,
+      /** Account-deployment fields. Both present or both absent. */
+      factory: address.optional(),
+      factoryData: hexString.optional(),
+      callData: hexString,
+      callGasLimit: uint128,
+      verificationGasLimit: uint128,
+      preVerificationGas: quantity,
+      maxFeePerGas: uint128,
+      maxPriorityFeePerGas: uint128,
+      /**
+       * The account's signature. Optional: a client estimating gas has not signed yet, and the
+       * paymaster's attestation does not cover it anyway — the account signature is over a hash
+       * that includes our paymasterAndData, so it cannot exist until after we respond.
+       */
+      signature: hexString.optional(),
+    }),
+    /** Which policy to evaluate against. Resolved from the API key in production. */
+    policyId: z.string().min(1).max(128).optional(),
+  })
   .refine((value) => (value.userOperation.factory === undefined) === (value.userOperation.factoryData === undefined), {
     message: "factory and factoryData must be provided together",
     path: ["userOperation", "factory"],

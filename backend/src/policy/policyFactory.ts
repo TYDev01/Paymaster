@@ -12,6 +12,7 @@ import {
   SenderBlocklistRule,
   TargetAllowlistRule,
 } from "./rules/accessLists.js";
+import {TokenOwnershipRule, type TokenBalanceReader} from "./rules/tokenOwnership.js";
 
 /**
  * Turns stored rule rows into rule objects.
@@ -77,6 +78,20 @@ const RULE_SCHEMAS = {
     allowBareValueTransfer: z.boolean().optional(),
   }),
   "no-value-transfer": z.object({}),
+  "token-ownership": z
+    .object({
+      token: addressSchema.optional(),
+      // JSON object keys are strings; the rule keys its lookup by numeric chainId either way.
+      tokenByChain: z.record(z.string().regex(/^[0-9]+$/, "chainId key must be numeric"), addressSchema).optional(),
+      // Positive: a minimum of 0 would sponsor every holder and non-holder alike, which is never
+      // what a token-ownership requirement means and is almost certainly a typo.
+      minBalance: bigintSchema.refine((v) => v > 0n, "must be greater than 0").optional(),
+      standard: z.enum(["erc20", "erc721"]).optional(),
+    })
+    .refine(
+      (c) => c.token !== undefined || (c.tokenByChain !== undefined && Object.keys(c.tokenByChain).length > 0),
+      "must set `token`, `tokenByChain`, or both — otherwise no chain has a token to check",
+    ),
   quota: z.object({
     name: z.string().min(1).max(64),
     subject: z.enum(["wallet", "ip", "apiKey", "chain", "target", "global"]),
@@ -115,7 +130,17 @@ export interface PolicyRuleSpec {
  * must not be expressible in a policy row.
  */
 export class PolicyFactory {
-  constructor(private readonly quotas: QuotaStore) {}
+  /**
+   * @param quotas Backs quota rules; a deployment-wide dependency, not per-rule config.
+   * @param tokenReader Backs the token-ownership rule's chain read. Optional so a deployment with no
+   *   chain wiring (e.g. a policy-validation tool) can still build the pure rules. Building a
+   *   `token-ownership` rule without it THROWS rather than skips — a policy that demands a holding
+   *   must never degrade to sponsoring everyone.
+   */
+  constructor(
+    private readonly quotas: QuotaStore,
+    private readonly tokenReader?: TokenBalanceReader,
+  ) {}
 
   build(policyId: string, spec: PolicyRuleSpec): PolicyRule {
     if (!isRuleType(spec.ruleType)) {
@@ -144,6 +169,23 @@ export class PolicyFactory {
    */
   #construct(ruleType: RuleType, config: RuleConfig): PolicyRule {
     switch (ruleType) {
+      case "token-ownership": {
+        if (this.tokenReader === undefined) {
+          // Fail closed: refusing the whole reload (PolicySource keeps the last good set) is safer
+          // than building a rule that cannot read balances, which would either error on every
+          // request or, worse, be dropped and sponsor non-holders.
+          throw new Error("token-ownership rule requires a chain-backed TokenBalanceReader, which is not configured");
+        }
+        const c = config as RuleConfigFor<"token-ownership">;
+        return new TokenOwnershipRule(this.tokenReader, {
+          ...(c.token === undefined ? {} : {token: c.token}),
+          ...(c.tokenByChain === undefined
+            ? {}
+            : {tokenByChain: Object.fromEntries(Object.entries(c.tokenByChain).map(([id, a]) => [Number(id), a]))}),
+          ...(c.minBalance === undefined ? {} : {minBalance: c.minBalance}),
+          ...(c.standard === undefined ? {} : {standard: c.standard}),
+        });
+      }
       case "chain-enabled":
         return new ChainEnabledRule((config as RuleConfigFor<"chain-enabled">).chainIds);
       case "sender-allowlist":

@@ -114,7 +114,12 @@ describe("SDK userOpHash <-> EntryPoint (differential)", () => {
       sdkOp({nonce: 2n ** 200n}),
       sdkOp({callData: `0x${"ab".repeat(500)}`}),
       sdkOp({factory: PAYMASTER, factoryData: "0xabcdef"}),
-      sdkOp({paymaster: PAYMASTER, paymasterVerificationGasLimit: 300_000n, paymasterPostOpGasLimit: 50_000n, paymasterData: "0xcafe"}),
+      sdkOp({
+        paymaster: PAYMASTER,
+        paymasterVerificationGasLimit: 300_000n,
+        paymasterPostOpGasLimit: 50_000n,
+        paymasterData: "0xcafe",
+      }),
       sdkOp({preVerificationGas: 2n ** 100n}),
     ];
     for (const op of cases) {
@@ -157,9 +162,21 @@ describeBundler("SDK drives the whole platform (SDK -> backend -> bundler -> cha
       "function createAccount(address owner, uint256 salt) returns (address)",
       "function getAddress(address owner, uint256 salt) view returns (address)",
     ]);
-    account = await anvil.publicClient.readContract({address: factory, abi: factoryAbi, functionName: "getAddress", args: [accountOwner.address, 0n]});
+    account = await anvil.publicClient.readContract({
+      address: factory,
+      abi: factoryAbi,
+      functionName: "getAddress",
+      args: [accountOwner.address, 0n],
+    });
     await anvil.publicClient.waitForTransactionReceipt({
-      hash: await anvil.walletClient.writeContract({address: factory, abi: factoryAbi, functionName: "createAccount", args: [accountOwner.address, 0n], account: anvil.walletClient.account!, chain: anvil.walletClient.chain!}),
+      hash: await anvil.walletClient.writeContract({
+        address: factory,
+        abi: factoryAbi,
+        functionName: "createAccount",
+        args: [accountOwner.address, 0n],
+        account: anvil.walletClient.account!,
+        chain: anvil.walletClient.chain!,
+      }),
     });
 
     const pmArtifact = loadArtifact("VerifyingPaymaster.sol", "VerifyingPaymaster");
@@ -196,27 +213,66 @@ describeBundler("SDK drives the whole platform (SDK -> backend -> bundler -> cha
       minStakeWei: parseEther("1"),
       enabled: true,
     };
-    const policySource = new PolicySource({load: async () => [{id: "default", rules: [new ChainEnabledRule([chainId])]}]});
+    const policySource = new PolicySource({
+      load: async () => [{id: "default", rules: [new ChainEnabledRule([chainId])]}],
+    });
     await policySource.reload();
 
     const env: Env = {
-      NODE_ENV: "test", PORT: 0, HOST: "127.0.0.1",
-      SPONSORSHIP_SIGNER_KEY: signerKey, CHAINS: "[]",
-      SPONSORSHIP_VALIDITY_SECONDS: 300, PAYMASTER_VERIFICATION_GAS_LIMIT: 300_000n,
-      POSTOP_GAS_LIMIT: 50_000n, DEFAULT_POLICY_ID: "default",
-      DATABASE_MAX_CONNECTIONS: 5, DATABASE_MIGRATE_ON_BOOT: true,
+      NODE_ENV: "test",
+      PORT: 0,
+      HOST: "127.0.0.1",
+      SPONSORSHIP_SIGNER_KEY: signerKey,
+      CHAINS: "[]",
+      SPONSORSHIP_VALIDITY_SECONDS: 300,
+      PAYMASTER_VERIFICATION_GAS_LIMIT: 300_000n,
+      POSTOP_GAS_LIMIT: 50_000n,
+      DEFAULT_POLICY_ID: "default",
+      DATABASE_MAX_CONNECTIONS: 5,
+      DATABASE_MIGRATE_ON_BOOT: true,
+      FUNDING_MONITOR_ENABLED: false,
+      FUNDING_MONITOR_INTERVAL_MS: 60_000,
+      FUNDING_MONITOR_REALERT_MS: 3_600_000,
+      RECONCILER_ENABLED: false,
+      RECONCILER_INTERVAL_MS: 60_000,
+      RECONCILER_CONFIRMATIONS: 5,
+      RECONCILER_MAX_BLOCK_RANGE: 2_000,
+      RECONCILER_INITIAL_LOOKBACK_BLOCKS: 5_000,
+      METRICS_ENABLED: false,
+      IP_THROTTLE_ENABLED: false,
+      IP_THROTTLE_REQUESTS_PER_WINDOW: 100,
+      IP_THROTTLE_WINDOW_SECONDS: 60,
+      IP_ABUSE_AUTH_FAILURE_THRESHOLD: 20,
+      IP_ABUSE_BLOCK_WINDOW_SECONDS: 900,
+      REQUEST_SIGNING_MAX_SKEW_SECONDS: 300,
+      ADMIN_JWT_TTL_SECONDS: 900,
+      ADMIN_JWT_ISSUER: "paymaster",
+      ADMIN_JWT_AUDIENCE: "paymaster-admin",
     };
     const deps: AppDependencies = {
       chains: ChainRegistry.fromConfigs([chainConfig]),
       policies: policySource,
       signer: new LocalSponsorshipSigner(signerKey),
       apiKeys: new InMemoryApiKeyStore([
-        {id: "k", name: "sdk", hash: keyGen.hash, displayPrefix: keyGen.displayPrefix, roles: ["sponsor"], policyId: undefined, enabled: true, createdAt: 0, expiresAt: undefined, lastUsedAt: undefined},
+        {
+          id: "k",
+          name: "sdk",
+          hash: keyGen.hash,
+          displayPrefix: keyGen.displayPrefix,
+          roles: ["sponsor"],
+          policyId: undefined,
+          enabled: true,
+          createdAt: 0,
+          expiresAt: undefined,
+          lastUsedAt: undefined,
+        },
       ]),
       quotasAreLocal: true,
       env,
     };
-    app = await NestFactory.create<NestFastifyApplication>(AppModule.forRoot(deps), new FastifyAdapter(), {logger: false});
+    app = await NestFactory.create<NestFastifyApplication>(AppModule.forRoot(deps), new FastifyAdapter(), {
+      logger: false,
+    });
     app.useGlobalFilters(new DomainErrorFilter());
     await app.listen({port: 0, host: "127.0.0.1"});
     const address = app.getHttpServer().address();
@@ -284,7 +340,11 @@ describeBundler("SDK drives the whole platform (SDK -> backend -> bundler -> cha
   it("prepareUserOperation produces a submittable, sponsored, signed op", async () => {
     const op = await client().prepareUserOperation(
       {sender: account, nonce: await currentNonce(), callData},
-      {maxFeePerGas: await viableMaxFee(), maxPriorityFeePerGas: 1_000_000_000n, signUserOperationHash: (h) => accountOwner.signMessage({message: {raw: h}})},
+      {
+        maxFeePerGas: await viableMaxFee(),
+        maxPriorityFeePerGas: 1_000_000_000n,
+        signUserOperationHash: (h) => accountOwner.signMessage({message: {raw: h}}),
+      },
     );
 
     expect(op.paymaster?.toLowerCase()).toBe(paymaster.toLowerCase());
@@ -297,14 +357,22 @@ describeBundler("SDK drives the whole platform (SDK -> backend -> bundler -> cha
     const bundlerClient = new BundlerClient({endpoint: bundler.rpcUrl});
     const paymasterClient = new PaymasterClient({endpoint: backendUrl, chainId, apiKey});
 
-    expect((await bundlerClient.supportedEntryPoints()).map((e) => e.toLowerCase())).toContain(entryPoint.toLowerCase());
+    expect((await bundlerClient.supportedEntryPoints()).map((e) => e.toLowerCase())).toContain(
+      entryPoint.toLowerCase(),
+    );
     expect(await bundlerClient.chainId()).toBe(chainId);
 
     // PaymasterClient alone still returns a usable sponsorship.
     const sponsorship = await paymasterClient.sponsor({
-      sender: account, nonce: await currentNonce(), callData,
-      callGasLimit: 200_000n, verificationGasLimit: 500_000n, preVerificationGas: 100_000n,
-      maxFeePerGas: await viableMaxFee(), maxPriorityFeePerGas: 1_000_000_000n, signature: "0x",
+      sender: account,
+      nonce: await currentNonce(),
+      callData,
+      callGasLimit: 200_000n,
+      verificationGasLimit: 500_000n,
+      preVerificationGas: 100_000n,
+      maxFeePerGas: await viableMaxFee(),
+      maxPriorityFeePerGas: 1_000_000_000n,
+      signature: "0x",
     });
     expect(sponsorship.paymaster.toLowerCase()).toBe(paymaster.toLowerCase());
   }, 90_000);

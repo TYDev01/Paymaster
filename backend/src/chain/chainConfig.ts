@@ -60,7 +60,10 @@ export interface ChainConfigWarning {
  * paymaster address would otherwise produce signatures bound to a contract that does not exist,
  * and every sponsorship on that chain would fail with an opaque AA34 at runtime.
  */
-export function validateChainConfig(config: ChainConfig): {config: ChainConfig; warnings: readonly ChainConfigWarning[]} {
+export function validateChainConfig(config: ChainConfig): {
+  config: ChainConfig;
+  warnings: readonly ChainConfigWarning[];
+} {
   const {chainId} = config;
   const warnings: ChainConfigWarning[] = [];
 
@@ -114,7 +117,10 @@ export function validateChainConfig(config: ChainConfig): {config: ChainConfig; 
     throw new InvalidChainConfigError(chainId, "deposit and stake thresholds must not be negative");
   }
   if (config.nativeCurrency.decimals < 0 || config.nativeCurrency.decimals > 36) {
-    throw new InvalidChainConfigError(chainId, `implausible native currency decimals: ${config.nativeCurrency.decimals}`);
+    throw new InvalidChainConfigError(
+      chainId,
+      `implausible native currency decimals: ${config.nativeCurrency.decimals}`,
+    );
   }
 
   return {
