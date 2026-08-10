@@ -52,6 +52,13 @@ deploy/.env.local
 # Foundry script broadcast logs
 contracts/broadcast/
 
+# Deploy runner state. chains.json names environment-specific RPC env vars; deployments.json and
+# chains.env are generated from broadcast receipts. Committing them would put one environment's
+# addresses in everyone's tree. chains.example.json is the template and IS committed.
+deploy/chains.json
+deploy/deployments.json
+deploy/chains.env
+
 # OS cruft
 .DS_Store
 Thumbs.db

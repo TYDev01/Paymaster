@@ -1,4 +1,4 @@
-import {afterAll, beforeAll, beforeEach, describe, expect, it} from "vitest";
+import {afterAll, beforeAll, beforeEach, describe, expect, it, vi} from "vitest";
 import {toHex, type Address} from "viem";
 
 import {packUint128Pair, type PackedUserOperation} from "../src/domain/userOperation.js";
@@ -7,6 +7,8 @@ import {InMemoryQuotaStore} from "../src/policy/quota/inMemoryQuotaStore.js";
 import {RedisQuotaStore} from "../src/policy/quota/redisQuotaStore.js";
 import {windowEnd, type QuotaStore} from "../src/policy/quota/quotaStore.js";
 import {QuotaRule} from "../src/policy/rules/quotaRules.js";
+import {RedisPolicyBroadcast} from "../src/policy/policyBroadcast.js";
+import {RedisLeaderLock} from "../src/monitoring/leaderLock.js";
 import {startRedis, type TestRedis} from "./support/redis.js";
 
 const NOW = 1_700_000_000;
@@ -328,5 +330,120 @@ describe.each([
       expect((await rule.evaluate(oneEth)).allowed, `op ${i} must be allowed`).toBe(true);
     }
     expect(await rule.evaluate(oneEth), "the 11th ETH must exceed a 10 ETH cap").toMatchObject({allowed: false});
+  });
+});
+
+/**
+ * The pub/sub and lock adapters against a REAL Redis.
+ *
+ * The unit tests for these run against a fake, which can only prove the code does what I think
+ * Redis does. These prove the two things a fake cannot: that a connection in subscriber mode really
+ * does refuse other commands (the reason the broadcast needs a second connection), and that the
+ * lock's Lua scripts behave as written under a real interpreter.
+ */
+describe("RedisPolicyBroadcast against a real server", () => {
+  let server: TestRedis;
+
+  beforeAll(async () => {
+    server = await startRedis();
+  });
+
+  afterAll(async () => {
+    await server.stop();
+  });
+
+  it("delivers an announcement to a subscribed peer", async () => {
+    const channel = `test:policy:${Math.random()}`;
+    const broadcast = new RedisPolicyBroadcast(server.redis, () => server.redis.duplicate(), channel);
+
+    let announced = 0;
+    await broadcast.subscribe(() => {
+      announced += 1;
+    });
+    await broadcast.publish();
+
+    await vi.waitFor(() => expect(announced).toBe(1));
+    await broadcast.close();
+  });
+
+  it("leaves the shared connection usable, because the subscriber is a separate one", async () => {
+    const channel = `test:policy:${Math.random()}`;
+    const broadcast = new RedisPolicyBroadcast(server.redis, () => server.redis.duplicate(), channel);
+    await broadcast.subscribe(() => undefined);
+
+    // If the subscriber had reused the shared client, this would fail: a connection in subscriber
+    // mode accepts only subscribe/unsubscribe, and every quota operation runs on this client.
+    await expect(server.redis.set("still-usable", "yes")).resolves.toBe("OK");
+    expect(await server.redis.get("still-usable")).toBe("yes");
+
+    await broadcast.close();
+  });
+});
+
+describe("RedisLeaderLock against a real server", () => {
+  let server: TestRedis;
+
+  beforeAll(async () => {
+    server = await startRedis();
+  });
+
+  afterAll(async () => {
+    await server.stop();
+  });
+
+  function lock(holder: string, ttlMs = 30_000, key = "test:leader") {
+    return new RedisLeaderLock(server.redis, {key, holder, ttlMs});
+  }
+
+  it("grants leadership to exactly one contender", async () => {
+    const key = `test:leader:${Math.random()}`;
+    const a = lock("a", 30_000, key);
+    const b = lock("b", 30_000, key);
+
+    expect(await a.tryAcquire()).toBe(true);
+    expect(await b.tryAcquire()).toBe(false);
+  });
+
+  it("renews its own lease without letting anyone else extend it", async () => {
+    const key = `test:leader:${Math.random()}`;
+    const a = lock("a", 30_000, key);
+    const b = lock("b", 30_000, key);
+
+    await a.tryAcquire();
+    expect(await a.tryAcquire()).toBe(true); // renewal
+    expect(await server.redis.get(key)).toBe("a");
+
+    // b never held it, so its acquire must not overwrite a live lease.
+    expect(await b.tryAcquire()).toBe(false);
+    expect(await server.redis.get(key)).toBe("a");
+  });
+
+  it("expires the lease so a dead leader is replaced", async () => {
+    const key = `test:leader:${Math.random()}`;
+    const dead = lock("dead", 100, key);
+    const successor = lock("successor", 30_000, key);
+
+    await dead.tryAcquire();
+    expect(await successor.tryAcquire()).toBe(false);
+
+    // The holder stops renewing (a crashed pod). The lease has to lapse on its own.
+    await vi.waitFor(async () => expect(await successor.tryAcquire()).toBe(true), {timeout: 2_000});
+    expect(await server.redis.get(key)).toBe("successor");
+
+    // And the dead leader must not silently take it back on its next renewal attempt.
+    expect(await dead.tryAcquire()).toBe(false);
+  });
+
+  it("releases only its own lease", async () => {
+    const key = `test:leader:${Math.random()}`;
+    const a = lock("a", 30_000, key);
+    const b = lock("b", 30_000, key);
+
+    await a.tryAcquire();
+    await b.release(); // b holds nothing; this must not delete a's lease
+    expect(await server.redis.get(key)).toBe("a");
+
+    await a.release();
+    expect(await server.redis.get(key)).toBeNull();
   });
 });

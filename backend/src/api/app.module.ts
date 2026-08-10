@@ -1,3 +1,6 @@
+import {randomUUID} from "node:crypto";
+import {hostname} from "node:os";
+
 import {Module, type DynamicModule, type Provider} from "@nestjs/common";
 import IORedis, {type Redis} from "ioredis";
 
@@ -26,6 +29,10 @@ import {noopTracer, type Tracer} from "../monitoring/tracing.js";
 import {SpendReconciler} from "../reconciliation/spendReconciler.js";
 import {ChainRegistryEventSource} from "../reconciliation/chainEventSource.js";
 import {PostgresSpendReconciliationStore} from "../db/postgresSpendReconciliationStore.js";
+import {AlwaysLeader, RedisLeaderLock, type LeaderLock} from "../monitoring/leaderLock.js";
+import {LeaderOnlyAlerter, LeadershipService} from "../monitoring/leaderAlerter.js";
+import {NoopPolicyBroadcast, RedisPolicyBroadcast, type PolicyBroadcast} from "../policy/policyBroadcast.js";
+import {PolicyReloader} from "../policy/policyReloader.js";
 import {PolicyEngine, type Policy} from "../policy/engine.js";
 import {InMemoryQuotaStore} from "../policy/quota/inMemoryQuotaStore.js";
 import {RedisQuotaStore} from "../policy/quota/redisQuotaStore.js";
@@ -77,6 +84,8 @@ export interface AppDependencies {
   readonly signatureVerifier?: RequestSignatureVerifier | undefined;
   /** Tracer. The no-op tracer when OTEL_TRACES_ENABLED is false, so callers never null-check. */
   readonly tracer?: Tracer | undefined;
+  /** Announces policy changes to the other replicas. No-op without Redis (single replica). */
+  readonly policyBroadcast?: PolicyBroadcast | undefined;
   readonly env: Env;
 }
 
@@ -117,6 +126,7 @@ export class AppModule {
       apiKeys: deps.apiKeys,
       sponsorships: deps.sponsorships,
       audit: deps.audit,
+      broadcast: deps.policyBroadcast,
     });
 
     const providers: Provider[] = [
@@ -158,10 +168,25 @@ export async function buildDependencies(
   env: Env,
   makePolicies: (quotas: QuotaStore) => readonly Policy[],
 ): Promise<AppDependencies> {
+  const redis = env.REDIS_URL === undefined ? undefined : new IORedis(env.REDIS_URL, {maxRetriesPerRequest: 3});
+
+  // Leadership exists to stop N replicas paging N times for one globally-true condition. Without
+  // Redis there is only one replica, so it always leads.
+  const leaderLock: LeaderLock =
+    redis === undefined || !env.LEADER_ELECTION_ENABLED
+      ? new AlwaysLeader()
+      : new RedisLeaderLock(redis, {
+          key: env.LEADER_LOCK_KEY,
+          // Unique per process: two replicas sharing a holder id would each mistake the other's
+          // lease for their own and both act as leader.
+          holder: `${hostname()}:${process.pid}:${randomUUID()}`,
+          ttlMs: env.LEADER_LOCK_TTL_MS,
+        });
+
   // Shared across the circuit breakers, funding monitor, reconciler, and IP throttle so every
   // subsystem alerts through one sink. The log sink is always present — a pager is composed in
   // ALONGSIDE it, never instead of it, so an alert whose delivery fails is still recorded.
-  const alerter = buildAlerter(env);
+  const alerter = buildAlerter(env, leaderLock);
   const metrics = env.METRICS_ENABLED ? new PaymasterMetrics() : undefined;
   const tracer = buildTracer(env);
 
@@ -185,8 +210,16 @@ export async function buildDependencies(
     },
   });
 
-  const redis = env.REDIS_URL === undefined ? undefined : new IORedis(env.REDIS_URL, {maxRetriesPerRequest: 3});
   const quotas: QuotaStore = redis === undefined ? new InMemoryQuotaStore() : new RedisQuotaStore(redis);
+
+  // Policy changes reach every replica, not just the one that served the admin request. Without
+  // Redis this is a no-op, which is correct: there are no other replicas to tell.
+  const policyBroadcast: PolicyBroadcast =
+    redis === undefined
+      ? new NoopPolicyBroadcast()
+      : // A connection in subscriber mode accepts no other commands, so the subscriber must be its
+        // own connection — reusing the shared client would break every quota operation on it.
+        new RedisPolicyBroadcast(redis, () => redis.duplicate(), env.POLICY_BROADCAST_CHANNEL);
 
   const pool =
     env.DATABASE_URL === undefined
@@ -218,6 +251,15 @@ export async function buildDependencies(
   // The tracer's flush loop is a background service like any other, so shutdown drains the last
   // spans through the same lifecycle that stops the monitors.
   if (tracer instanceof OtlpTracer) backgroundServices.push(tracer);
+  // Renews the lease. Started FIRST in the list order below is not required — the alerter simply
+  // suppresses until leadership is acquired, which is the safe direction.
+  if (leaderLock instanceof RedisLeaderLock) {
+    backgroundServices.unshift(new LeadershipService(leaderLock, {ttlMs: env.LEADER_LOCK_TTL_MS}));
+  }
+  // Converges this replica's policy set: timer for correctness, broadcast for latency.
+  backgroundServices.push(
+    new PolicyReloader(policySource, policyBroadcast, {intervalMs: env.POLICY_RELOAD_INTERVAL_MS}),
+  );
 
   const jwt =
     env.ADMIN_JWT_SECRET === undefined
@@ -259,6 +301,7 @@ export async function buildDependencies(
     jwt,
     ipThrottle,
     signatureVerifier,
+    policyBroadcast,
     signer: await buildSigner(env),
     apiKeys: pool === undefined ? buildApiKeyStore(env) : new PostgresApiKeyStore(pool),
     sponsorships: pool === undefined ? undefined : new SponsorshipRepository(pool),
@@ -278,7 +321,7 @@ export async function buildDependencies(
  * ordering is the point: `CompositeAlerter` isolates each sink, so a pager outage degrades to a
  * logged alert rather than to no alert — and the pager outage itself is logged by the same path.
  */
-function buildAlerter(env: Env): Alerter {
+function buildAlerter(env: Env, leaderLock: LeaderLock): Alerter {
   const logging = new LoggingAlerter();
   if (env.ALERT_WEBHOOK_URL === undefined) return logging;
 
@@ -292,7 +335,9 @@ function buildAlerter(env: Env): Alerter {
     signingSecret: env.ALERT_WEBHOOK_SIGNING_SECRET,
     source: env.OTEL_SERVICE_NAME,
   });
-  return new CompositeAlerter([logging, webhook]);
+  // Only the pager is leader-gated. The log sink stays ungated on every replica, so a condition
+  // that is genuinely local to a follower is still recorded where it happened.
+  return new CompositeAlerter([logging, new LeaderOnlyAlerter(webhook, leaderLock)]);
 }
 
 /**
