@@ -3,8 +3,8 @@ import {encodeFunctionData, parseAbi, toHex, type Address, type Hex} from "viem"
 
 import {packUint128Pair, type PackedUserOperation} from "../src/domain/userOperation.js";
 import {decodeCallTargets} from "../src/policy/callData.js";
-import type {PolicyContext, PolicyDecision} from "../src/policy/context.js";
-import {ALLOW, deny} from "../src/policy/context.js";
+import type {PolicyContext} from "../src/policy/context.js";
+import {ALLOW} from "../src/policy/context.js";
 import {orderRules, PolicyEngine, type Policy} from "../src/policy/engine.js";
 import {PolicySource, UnknownPolicyError, type PolicyRepository} from "../src/policy/policySource.js";
 import type {PolicyRule} from "../src/policy/rule.js";
@@ -204,7 +204,13 @@ describe("access list rules", () => {
 });
 
 describe("QuotaRule", () => {
-  const options = {name: "wallet-daily", subject: "wallet", unit: "operations", limit: 2n, windowSeconds: 86_400} as const;
+  const options = {
+    name: "wallet-daily",
+    subject: "wallet",
+    unit: "operations",
+    limit: 2n,
+    windowSeconds: 86_400,
+  } as const;
 
   it("admits up to the limit then refuses", async () => {
     const rule = new QuotaRule(new InMemoryQuotaStore(), options);
@@ -313,7 +319,10 @@ describe("PolicyEngine", () => {
   const engine = new PolicyEngine();
 
   it("approves when every rule approves", async () => {
-    const result = await engine.evaluate(policy(new ChainEnabledRule([8453]), new SenderAllowlistRule([SENDER])), context());
+    const result = await engine.evaluate(
+      policy(new ChainEnabledRule([8453]), new SenderAllowlistRule([SENDER])),
+      context(),
+    );
     expect(result.decision.allowed).toBe(true);
   });
 

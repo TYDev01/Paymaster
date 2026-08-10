@@ -57,7 +57,6 @@ export function createPool(config: DatabaseConfig): DatabasePool {
    * process — turning a routine database blip into a crash loop.
    */
   pool.on("error", (error) => {
-    // eslint-disable-next-line no-console -- the logger is not available at this layer
     console.error(`[db] idle client error: ${error.message}`);
   });
 

@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "paymaster.fullname" . }}
+  labels:
+    {{- include "paymaster.labels" . | nindent 4 }}
+data:
+  # Non-secret configuration only. Anything sensitive (DATABASE_URL, signer key, JWT secret, bootstrap
+  # key) is in the Secret, never here — a ConfigMap is world-readable to anything in the namespace.
+  NODE_ENV: "production"
+  HOST: "0.0.0.0"
+  PORT: "3000"
+  CHAINS: {{ .Values.config.chains | quote }}
+  SPONSORSHIP_VALIDITY_SECONDS: {{ .Values.config.sponsorshipValiditySeconds | quote }}
+  DEFAULT_POLICY_ID: {{ .Values.config.defaultPolicyId | quote }}
+
+  FUNDING_MONITOR_ENABLED: {{ .Values.config.fundingMonitor.enabled | quote }}
+  FUNDING_MONITOR_INTERVAL_MS: {{ .Values.config.fundingMonitor.intervalMs | quote }}
+  FUNDING_MONITOR_REALERT_MS: {{ .Values.config.fundingMonitor.reAlertMs | quote }}
+
+  RECONCILER_ENABLED: {{ .Values.config.reconciler.enabled | quote }}
+  RECONCILER_INTERVAL_MS: {{ .Values.config.reconciler.intervalMs | quote }}
+  RECONCILER_CONFIRMATIONS: {{ .Values.config.reconciler.confirmations | quote }}
+  RECONCILER_MAX_BLOCK_RANGE: {{ .Values.config.reconciler.maxBlockRange | quote }}
+  RECONCILER_INITIAL_LOOKBACK_BLOCKS: {{ .Values.config.reconciler.initialLookbackBlocks | quote }}
+
+  METRICS_ENABLED: {{ .Values.config.metricsEnabled | quote }}
+
+  {{- if .Values.config.jwt.enabled }}
+  ADMIN_JWT_TTL_SECONDS: {{ .Values.config.jwt.ttlSeconds | quote }}
+  ADMIN_JWT_ISSUER: {{ .Values.config.jwt.issuer | quote }}
+  ADMIN_JWT_AUDIENCE: {{ .Values.config.jwt.audience | quote }}
+  {{- end }}

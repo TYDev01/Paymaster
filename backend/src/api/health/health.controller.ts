@@ -3,12 +3,15 @@ import type {FastifyReply} from "fastify";
 
 import type {ChainRegistry} from "../../chain/chainRegistry.js";
 import type {PolicySource} from "../../policy/policySource.js";
+import type {PaymasterMetrics} from "../../monitoring/paymasterMetrics.js";
 
 export const HEALTH_DEPS = Symbol("HEALTH_DEPS");
 
 export interface HealthDeps {
   readonly chains: ChainRegistry;
   readonly policies: PolicySource;
+  /** Optional: readiness probes double as a cheap source of chain-health gauges. */
+  readonly metrics?: PaymasterMetrics | undefined;
 }
 
 /**
@@ -40,6 +43,7 @@ export class HealthController {
   @Get("ready")
   async ready(@Res({passthrough: true}) reply: FastifyReply): Promise<ReadinessReport> {
     const chains = await Promise.all(this.deps.chains.adapters.map((adapter) => adapter.health()));
+    for (const c of chains) this.deps.metrics?.recordChainHealth(c.chainId, c.healthy, c.blockNumber);
     const enabled = chains.filter((c) => this.deps.chains.has(c.chainId));
 
     const policiesLoaded = this.deps.policies.generation > 0;

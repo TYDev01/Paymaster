@@ -75,7 +75,9 @@ export function decodePaymasterAndData(data: Hex): PaymasterAndDataFields & {sig
   }
   return {
     paymaster: slice(data, 0, PAYMASTER_VALIDATION_GAS_OFFSET) as Address,
-    paymasterVerificationGasLimit: hexToBigInt(slice(data, PAYMASTER_VALIDATION_GAS_OFFSET, PAYMASTER_POSTOP_GAS_OFFSET)),
+    paymasterVerificationGasLimit: hexToBigInt(
+      slice(data, PAYMASTER_VALIDATION_GAS_OFFSET, PAYMASTER_POSTOP_GAS_OFFSET),
+    ),
     postOpGasLimit: hexToBigInt(slice(data, PAYMASTER_POSTOP_GAS_OFFSET, PAYMASTER_DATA_OFFSET)),
     validUntil: Number(hexToBigInt(slice(data, VALID_UNTIL_OFFSET, VALID_AFTER_OFFSET))),
     validAfter: Number(hexToBigInt(slice(data, VALID_AFTER_OFFSET, SIGNATURE_OFFSET))),

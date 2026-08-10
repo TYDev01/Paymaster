@@ -1,0 +1,24 @@
+{{- if .Values.serviceMonitor.enabled }}
+{{/*
+Prometheus Operator ServiceMonitor for the backend's /metrics endpoint. Requires the CRD, so it is
+off by default — enabling it without the operator installed would fail the release.
+*/}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "paymaster.fullname" . }}
+  labels:
+    {{- include "paymaster.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "paymaster.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+{{- end }}

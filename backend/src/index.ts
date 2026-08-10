@@ -69,13 +69,7 @@ export {
 } from "./policy/context.js";
 export {decodeCallTargets} from "./policy/callData.js";
 export {isReserving, RULE_COST_ORDER, type PolicyRule, type ReservingRule, type RuleCost} from "./policy/rule.js";
-export {
-  orderRules,
-  PolicyEngine,
-  type Policy,
-  type PolicyEvaluation,
-  type PolicyObserver,
-} from "./policy/engine.js";
+export {orderRules, PolicyEngine, type Policy, type PolicyEvaluation, type PolicyObserver} from "./policy/engine.js";
 export {
   PolicySource,
   UnknownPolicyError,

@@ -1,5 +1,5 @@
 import {describe, expect, it} from "vitest";
-import {encodeFunctionData, parseAbi, parseEther, toHex, type Address, type Hex} from "viem";
+import {encodeFunctionData, parseAbi, parseEther, type Address, type Hex} from "viem";
 
 import {CANONICAL_ENTRYPOINT_V07, type ChainConfig} from "../src/chain/chainConfig.js";
 import {ChainRegistry} from "../src/chain/chainRegistry.js";
@@ -10,11 +10,7 @@ import {QuotaRule} from "../src/policy/rules/quotaRules.js";
 import {SenderBlocklistRule} from "../src/policy/rules/accessLists.js";
 import {SignatureEngine} from "../src/signature/signatureEngine.js";
 import {LocalSponsorshipSigner, type SponsorshipSigner} from "../src/signature/signer.js";
-import {
-  SponsorService,
-  SponsorshipDeniedError,
-  type SponsorshipRecorder,
-} from "../src/api/sponsor/sponsor.service.js";
+import {SponsorService, SponsorshipDeniedError, type SponsorshipRecorder} from "../src/api/sponsor/sponsor.service.js";
 import type {SponsorRequest} from "../src/api/dto/sponsorRequest.js";
 
 const SIGNER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" as Hex;
@@ -217,9 +213,14 @@ describe("SponsorService", () => {
   describe("recording", () => {
     it("records what it committed to pay", async () => {
       const recorded: Parameters<SponsorshipRecorder["record"]>[0][] = [];
-      const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [{id: "default", rules: []}], 1_700_000_000, {
-        record: async (s) => void recorded.push(s),
-      });
+      const service = await buildService(
+        new LocalSponsorshipSigner(SIGNER_KEY),
+        [{id: "default", rules: []}],
+        1_700_000_000,
+        {
+          record: async (s) => void recorded.push(s),
+        },
+      );
 
       await service.sponsor(request(), {apiKeyId: "key-1"});
 
@@ -238,11 +239,16 @@ describe("SponsorService", () => {
      * sponsorship we declined. A recorder failure must not produce a silently unrecorded promise.
      */
     it("does not return an attestation it could not record", async () => {
-      const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [{id: "default", rules: []}], 1_700_000_000, {
-        record: async () => {
-          throw new Error("database unreachable");
+      const service = await buildService(
+        new LocalSponsorshipSigner(SIGNER_KEY),
+        [{id: "default", rules: []}],
+        1_700_000_000,
+        {
+          record: async () => {
+            throw new Error("database unreachable");
+          },
         },
-      });
+      );
 
       await expect(service.sponsor(request())).rejects.toThrow("database unreachable");
     });
@@ -256,11 +262,16 @@ describe("SponsorService", () => {
         limit: 3n,
         windowSeconds: 86_400,
       });
-      const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [{id: "default", rules: [quota]}], 1_700_000_000, {
-        record: async () => {
-          throw new Error("database unreachable");
+      const service = await buildService(
+        new LocalSponsorshipSigner(SIGNER_KEY),
+        [{id: "default", rules: [quota]}],
+        1_700_000_000,
+        {
+          record: async () => {
+            throw new Error("database unreachable");
+          },
         },
-      });
+      );
 
       await expect(service.sponsor(request())).rejects.toThrow("database unreachable");
 

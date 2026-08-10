@@ -1,0 +1,18 @@
+node_modules
+dist
+build
+coverage
+package-lock.json
+contracts/lib
+contracts/out
+contracts/cache
+sdk/dist
+backend/dist
+*.sol
+
+# Prose and hand-authored config are left to their authors; Prettier here formats code, not
+# documents. Reflowing Markdown prose and re-quoting YAML is churn without benefit.
+*.md
+*.yml
+*.yaml
+

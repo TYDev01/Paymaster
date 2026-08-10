@@ -99,7 +99,11 @@ export class DomainErrorFilter implements ExceptionFilter {
 
     // 409: the request is well-formed and the operator may resolve the conflict by unpinning keys.
     if (exception instanceof PolicyInUseError) {
-      return {status: HttpStatus.CONFLICT, body: {error: "POLICY_IN_USE", message: exception.message}, logLevel: "warn"};
+      return {
+        status: HttpStatus.CONFLICT,
+        body: {error: "POLICY_IN_USE", message: exception.message},
+        logLevel: "warn",
+      };
     }
 
     if (exception instanceof AdminUnavailableError) {

@@ -1,4 +1,4 @@
-import {ChainAdapter} from "./chainAdapter.js";
+import {ChainAdapter, type ChainAdapterOptions} from "./chainAdapter.js";
 import {validateChainConfigs, type ChainConfig, type ChainConfigWarning} from "./chainConfig.js";
 
 export class UnknownChainError extends Error {
@@ -30,12 +30,17 @@ export class ChainRegistry {
     this.warnings = warnings;
   }
 
-  /** Validates configs and builds adapters. Throws on the first invalid config. */
-  static fromConfigs(configs: readonly ChainConfig[]): ChainRegistry {
+  /**
+   * Validates configs and builds adapters. Throws on the first invalid config.
+   *
+   * `adapterOptions` (circuit-breaker thresholds and the state-change hook for alerting) apply to
+   * every adapter; the hook distinguishes chains by the `rpc:<chainId>` circuit name it receives.
+   */
+  static fromConfigs(configs: readonly ChainConfig[], adapterOptions: ChainAdapterOptions = {}): ChainRegistry {
     const {configs: validated, warnings} = validateChainConfigs(configs);
     const adapters = new Map<number, ChainAdapter>();
     for (const config of validated) {
-      adapters.set(config.chainId, ChainAdapter.create(config));
+      adapters.set(config.chainId, ChainAdapter.create(config, adapterOptions));
     }
     return new ChainRegistry(adapters, warnings);
   }

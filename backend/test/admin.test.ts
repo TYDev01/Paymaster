@@ -19,7 +19,7 @@ import {PolicySource} from "../src/policy/policySource.js";
 import {InMemoryQuotaStore} from "../src/policy/quota/inMemoryQuotaStore.js";
 import {LocalSponsorshipSigner} from "../src/signature/signer.js";
 import type {Env} from "../src/config/env.js";
-import {startPostgres, truncateAll, type TestPostgres} from "./support/postgres.js";
+import {startPostgres, type TestPostgres} from "./support/postgres.js";
 
 const SIGNER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const PAYMASTER = "0x1111111111111111111111111111111111111111" as Address;
@@ -47,6 +47,24 @@ describe("admin API", () => {
     DEFAULT_POLICY_ID: "default",
     DATABASE_MAX_CONNECTIONS: 5,
     DATABASE_MIGRATE_ON_BOOT: true,
+    FUNDING_MONITOR_ENABLED: false,
+    FUNDING_MONITOR_INTERVAL_MS: 60_000,
+    FUNDING_MONITOR_REALERT_MS: 3_600_000,
+    RECONCILER_ENABLED: false,
+    RECONCILER_INTERVAL_MS: 60_000,
+    RECONCILER_CONFIRMATIONS: 5,
+    RECONCILER_MAX_BLOCK_RANGE: 2_000,
+    RECONCILER_INITIAL_LOOKBACK_BLOCKS: 5_000,
+    METRICS_ENABLED: false,
+    IP_THROTTLE_ENABLED: false,
+    IP_THROTTLE_REQUESTS_PER_WINDOW: 100,
+    IP_THROTTLE_WINDOW_SECONDS: 60,
+    IP_ABUSE_AUTH_FAILURE_THRESHOLD: 20,
+    IP_ABUSE_BLOCK_WINDOW_SECONDS: 900,
+    REQUEST_SIGNING_MAX_SKEW_SECONDS: 300,
+    ADMIN_JWT_TTL_SECONDS: 900,
+    ADMIN_JWT_ISSUER: "paymaster",
+    ADMIN_JWT_AUDIENCE: "paymaster-admin",
   };
 
   const chainConfig: ChainConfig = {
@@ -138,7 +156,10 @@ describe("admin API", () => {
     rules: [
       {ruleType: "chain-enabled", config: {chainIds: [8453]}},
       {ruleType: "target-allowlist", config: {addresses: [USDC]}},
-      {ruleType: "quota", config: {name: "w", subject: "wallet", unit: "operations", limit: "10", windowSeconds: 86_400}},
+      {
+        ruleType: "quota",
+        config: {name: "w", subject: "wallet", unit: "operations", limit: "10", windowSeconds: 86_400},
+      },
     ],
     ...over,
   });
@@ -387,7 +408,9 @@ describe("admin API", () => {
       await call("POST", "/admin/policies", adminKey, samplePolicy());
       await call("DELETE", "/admin/policies/acme", adminKey);
 
-      const actions = (await call("GET", "/admin/audit", adminKey)).json().entries.map((e: {action: string}) => e.action);
+      const actions = (await call("GET", "/admin/audit", adminKey))
+        .json()
+        .entries.map((e: {action: string}) => e.action);
       expect(actions).toContain("policy.delete");
     });
 

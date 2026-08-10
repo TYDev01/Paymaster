@@ -1,0 +1,171 @@
+# Default values for the paymaster chart.
+#
+# The backend is stateless — all state lives in PostgreSQL and Redis — so nothing here is a
+# StatefulSet and replicas are interchangeable. The one thing that could race across replicas,
+# schema migration, is serialised by a Postgres advisory lock in the app, so `replicaCount > 1`
+# under a rolling deploy is safe out of the box.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/your-org/paymaster-backend
+  tag: "" # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Applied to every pod. The defaults drop all privilege the container does not need — the backend
+# is a network service that reads no local files it did not ship with.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  type: ClusterIP
+  port: 80
+  # The container listens on 3000; the Service maps `port` to it. Kept internal by default — expose
+  # via Ingress, not a LoadBalancer Service, so TLS and auth live at the edge.
+  targetPort: 3000
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: paymaster.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    # No CPU limit by default: this is a latency-sensitive JSON path, and a CPU limit throttles
+    # tail latency under burst for no isolation benefit on a dedicated node pool. Memory IS limited,
+    # because a leak should kill one pod, not the node.
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: ""
+
+# A PodDisruptionBudget so a node drain cannot take every replica at once. minAvailable is kept
+# below replicaCount so a voluntary disruption can still proceed one pod at a time.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Prometheus Operator ServiceMonitor for the /metrics endpoint. Off unless the operator is present.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Spread replicas across nodes so a single node failure does not drop the whole service. Soft by
+# default (scheduling still succeeds on a small cluster).
+topologySpreadConstraints:
+  enabled: true
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: ScheduleAnyway
+
+# ------------------------------------------------------------------------------------------------
+# Application configuration
+# ------------------------------------------------------------------------------------------------
+config:
+  # Non-secret env. CHAINS is the one required value with no sensible default — set it per environment.
+  chains: "" # JSON array; see backend/.env.example
+  logLevel: "log"
+  sponsorshipValiditySeconds: 300
+  defaultPolicyId: "default"
+
+  fundingMonitor:
+    enabled: true
+    intervalMs: 60000
+    reAlertMs: 3600000
+
+  reconciler:
+    enabled: true
+    intervalMs: 60000
+    confirmations: 5
+    maxBlockRange: 2000
+    initialLookbackBlocks: 5000
+
+  metricsEnabled: true
+
+  jwt:
+    # When true, ADMIN_JWT_SECRET is expected in the secret and /admin/auth/token is enabled.
+    enabled: false
+    ttlSeconds: 900
+    issuer: "paymaster"
+    audience: "paymaster-admin"
+
+# ------------------------------------------------------------------------------------------------
+# Secrets
+# ------------------------------------------------------------------------------------------------
+# The chart never invents a secret. Point `existingSecret` at a Secret you manage (ideally synced
+# from a real secret store — External Secrets, Vault, SOPS), OR set `create: true` with inline
+# values for a throwaway environment. Inline secrets in values.yaml are for dev only; they end up
+# in Helm release history in plaintext.
+secrets:
+  existingSecret: ""
+  create: false
+  # Used only when create: true. Keys map to the env vars the backend reads.
+  values:
+    DATABASE_URL: ""
+    REDIS_URL: ""
+    # Exactly one signer source, matching the backend's own validation.
+    SPONSORSHIP_SIGNER_KEY: ""
+    SPONSORSHIP_SIGNER_KMS_KEY_ID: ""
+    BOOTSTRAP_API_KEY: ""
+    ADMIN_JWT_SECRET: ""
+
+# Extra env vars appended verbatim (e.g. AWS_REGION for KMS). List of {name, value} or {name, valueFrom}.
+extraEnv: []
+
+# Liveness restarts a wedged process; readiness gates traffic. They are deliberately different
+# endpoints: an RPC outage must fail readiness (route traffic away) without failing liveness
+# (which would restart-loop every pod and turn a degradation into an outage).
+livenessProbe:
+  path: /health/live
+  initialDelaySeconds: 15
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  path: /health/ready
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# Give in-flight sponsorships time to finish on shutdown before SIGKILL.
+terminationGracePeriodSeconds: 30

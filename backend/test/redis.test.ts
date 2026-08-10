@@ -76,7 +76,9 @@ describe("RedisQuotaStore", () => {
 
   it("counts each key separately", async () => {
     await store.tryConsume({key: "a", amount: 1n, limit: 1n, windowSeconds: 60, now: NOW});
-    expect((await store.tryConsume({key: "b", amount: 1n, limit: 1n, windowSeconds: 60, now: NOW})).consumed).toBe(true);
+    expect((await store.tryConsume({key: "b", amount: 1n, limit: 1n, windowSeconds: 60, now: NOW})).consumed).toBe(
+      true,
+    );
   });
 
   it("starts a fresh count in the next window", async () => {
@@ -128,7 +130,10 @@ describe("RedisQuotaStore", () => {
       const params = {key: "replicas", amount: 1n, limit: 3n, windowSeconds: 60, now: NOW};
       const results = await Promise.all(stores.flatMap((s) => Array.from({length: 20}, () => s.tryConsume(params))));
 
-      expect(results.filter((r) => r.consumed), "the limit must hold across replicas").toHaveLength(3);
+      expect(
+        results.filter((r) => r.consumed),
+        "the limit must hold across replicas",
+      ).toHaveLength(3);
     } finally {
       // Left open, these keep reconnecting after the server stops and surface as unhandled
       // ioredis error events — noise that would hide a real connection leak later.
@@ -253,7 +258,9 @@ describe.each([
   it("isolates windows", async () => {
     const key = `contract-window-${Math.random()}`;
     await store.tryConsume({key, amount: 1n, limit: 1n, windowSeconds: 60, now: NOW});
-    expect((await store.tryConsume({key, amount: 1n, limit: 1n, windowSeconds: 60, now: NOW + 60})).consumed).toBe(true);
+    expect((await store.tryConsume({key, amount: 1n, limit: 1n, windowSeconds: 60, now: NOW + 60})).consumed).toBe(
+      true,
+    );
   });
 
   it("drives a QuotaRule spend cap identically", async () => {

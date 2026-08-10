@@ -5,7 +5,7 @@ import {generateApiKey, hashApiKey} from "../src/auth/apiKey.js";
 import type {ApiKeyRecord} from "../src/auth/apiKeyStore.js";
 import {ApiKeyAuthenticator} from "../src/auth/authenticator.js";
 import {AuditLogRepository} from "../src/db/auditLogRepository.js";
-import {loadMigrations, migrate, MigrationError} from "../src/db/migrate.js";
+import {loadMigrations, migrate} from "../src/db/migrate.js";
 import {PostgresApiKeyStore} from "../src/db/postgresApiKeyStore.js";
 import {SponsorshipRepository} from "../src/db/sponsorshipRepository.js";
 import {startPostgres, truncateAll, type TestPostgres} from "./support/postgres.js";
@@ -52,9 +52,7 @@ describe("database", () => {
       const store = new PostgresApiKeyStore(pg.pool);
       await store.create(keyRecord({policyId: "pinned"}).record);
 
-      await expect(pg.pool.query("DELETE FROM policies WHERE id = 'pinned'")).rejects.toThrow(
-        /foreign key constraint/,
-      );
+      await expect(pg.pool.query("DELETE FROM policies WHERE id = 'pinned'")).rejects.toThrow(/foreign key constraint/);
     });
   });
 
@@ -265,9 +263,9 @@ describe("database", () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record} = keyRecord();
       await store.create(record);
-      await expect(
-        pg.pool.query("UPDATE api_keys SET enabled = false WHERE id = $1", [record.id]),
-      ).rejects.toThrow(/api_keys_revoked_consistency/);
+      await expect(pg.pool.query("UPDATE api_keys SET enabled = false WHERE id = $1", [record.id])).rejects.toThrow(
+        /api_keys_revoked_consistency/,
+      );
     });
   });
 

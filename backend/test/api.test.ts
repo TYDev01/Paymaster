@@ -8,7 +8,7 @@ import {privateKeyToAccount} from "viem/accounts";
 
 import {AppModule, type AppDependencies} from "../src/api/app.module.js";
 import {DomainErrorFilter} from "../src/api/filters/domainError.filter.js";
-import {CANONICAL_ENTRYPOINT_V07, type ChainConfig} from "../src/chain/chainConfig.js";
+import {type ChainConfig} from "../src/chain/chainConfig.js";
 import {ChainRegistry} from "../src/chain/chainRegistry.js";
 import type {Policy} from "../src/policy/engine.js";
 import {PolicySource} from "../src/policy/policySource.js";
@@ -62,6 +62,24 @@ describe("POST /paymaster/sponsor", () => {
     DEFAULT_POLICY_ID: "default",
     DATABASE_MAX_CONNECTIONS: 10,
     DATABASE_MIGRATE_ON_BOOT: true,
+    FUNDING_MONITOR_ENABLED: false,
+    FUNDING_MONITOR_INTERVAL_MS: 60_000,
+    FUNDING_MONITOR_REALERT_MS: 3_600_000,
+    RECONCILER_ENABLED: false,
+    RECONCILER_INTERVAL_MS: 60_000,
+    RECONCILER_CONFIRMATIONS: 5,
+    RECONCILER_MAX_BLOCK_RANGE: 2_000,
+    RECONCILER_INITIAL_LOOKBACK_BLOCKS: 5_000,
+    METRICS_ENABLED: false,
+    IP_THROTTLE_ENABLED: false,
+    IP_THROTTLE_REQUESTS_PER_WINDOW: 100,
+    IP_THROTTLE_WINDOW_SECONDS: 60,
+    IP_ABUSE_AUTH_FAILURE_THRESHOLD: 20,
+    IP_ABUSE_BLOCK_WINDOW_SECONDS: 900,
+    REQUEST_SIGNING_MAX_SKEW_SECONDS: 300,
+    ADMIN_JWT_TTL_SECONDS: 900,
+    ADMIN_JWT_ISSUER: "paymaster",
+    ADMIN_JWT_AUDIENCE: "paymaster-admin",
   };
 
   beforeAll(async () => {
@@ -385,7 +403,10 @@ describe("POST /paymaster/sponsor", () => {
     });
 
     it("rejects a value that does not fit uint128", async () => {
-      const response = await post("/paymaster/sponsor", requestBody({userOperation: {callGasLimit: toHex(2n ** 128n)}}));
+      const response = await post(
+        "/paymaster/sponsor",
+        requestBody({userOperation: {callGasLimit: toHex(2n ** 128n)}}),
+      );
       expect(response.statusCode).toBe(400);
     });
 
@@ -469,8 +490,8 @@ describe("POST /paymaster/sponsor", () => {
      */
     it("does not distinguish failure reasons to the caller", async () => {
       const bodies = await Promise.all(
-        ([NO_KEY, generateApiKey("test").secret, revokedKey, expiredKey] as (string | typeof NO_KEY)[]).map(async (key) =>
-          JSON.stringify((await post("/paymaster/sponsor", requestBody(), key)).json()),
+        ([NO_KEY, generateApiKey("test").secret, revokedKey, expiredKey] as (string | typeof NO_KEY)[]).map(
+          async (key) => JSON.stringify((await post("/paymaster/sponsor", requestBody(), key)).json()),
         ),
       );
       expect(new Set(bodies).size, "all auth failures must return an identical body").toBe(1);

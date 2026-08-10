@@ -1,9 +1,4 @@
-import {
-  callGasLimit,
-  maxFeePerGas,
-  verificationGasLimit,
-  type PackedUserOperation,
-} from "../domain/userOperation.js";
+import {callGasLimit, maxFeePerGas, verificationGasLimit, type PackedUserOperation} from "../domain/userOperation.js";
 
 export interface MaxCostParams {
   readonly userOp: PackedUserOperation;

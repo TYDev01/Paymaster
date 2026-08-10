@@ -126,7 +126,12 @@ describe("toRpcUserOperation", () => {
 
   it("includes paymaster fields when present", () => {
     const rpc = toRpcUserOperation(
-      op({paymaster: PAYMASTER, paymasterVerificationGasLimit: 300_000n, paymasterPostOpGasLimit: 50_000n, paymasterData: "0xcafe"}),
+      op({
+        paymaster: PAYMASTER,
+        paymasterVerificationGasLimit: 300_000n,
+        paymasterPostOpGasLimit: 50_000n,
+        paymasterData: "0xcafe",
+      }),
     );
     expect(rpc["paymaster"]).toBe(PAYMASTER);
     expect(rpc["paymasterData"]).toBe("0xcafe");
@@ -146,7 +151,12 @@ describe("PaymasterClient", () => {
 
   it("posts to /paymaster/sponsor with the chain id and bearer token", async () => {
     const {fn, calls} = stubFetch({body: response});
-    const client = new PaymasterClient({endpoint: "https://pm.example.com/", chainId: 8453, apiKey: "pm_test_key", transport: {fetch: fn}});
+    const client = new PaymasterClient({
+      endpoint: "https://pm.example.com/",
+      chainId: 8453,
+      apiKey: "pm_test_key",
+      transport: {fetch: fn},
+    });
 
     const sponsorship = await client.sponsor(op());
 

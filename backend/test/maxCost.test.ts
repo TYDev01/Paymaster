@@ -1,5 +1,5 @@
 import {afterAll, beforeAll, describe, expect, it} from "vitest";
-import {encodeFunctionData, keccak256, parseAbi, parseEther, toHex, type Address, type Hex} from "viem";
+import {encodeFunctionData, parseAbi, parseEther, toHex, type Address, type Hex} from "viem";
 import {privateKeyToAccount} from "viem/accounts";
 
 import {packUint128Pair, type PackedUserOperation} from "../src/domain/userOperation.js";
@@ -195,8 +195,7 @@ describe("maxCost <-> EntryPoint requiredPrefund", () => {
   }
 
   it("computes the same total the EntryPoint requires", () => {
-    const expected =
-      (VERIFICATION_GAS + CALL_GAS + PM_VERIFICATION_GAS + POSTOP_GAS + PRE_VERIFICATION_GAS) * MAX_FEE;
+    const expected = (VERIFICATION_GAS + CALL_GAS + PM_VERIFICATION_GAS + POSTOP_GAS + PRE_VERIFICATION_GAS) * MAX_FEE;
 
     expect(
       calculateMaxCost({

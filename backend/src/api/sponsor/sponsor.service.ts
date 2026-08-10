@@ -17,7 +17,10 @@ import type {SponsorResponse} from "../dto/sponsorResponse.js";
 
 /** Raised when policy refuses. Carries the denial so the HTTP layer can decide what to reveal. */
 export class SponsorshipDeniedError extends Error {
-  constructor(readonly denial: PolicyDenial, readonly policyId: string) {
+  constructor(
+    readonly denial: PolicyDenial,
+    readonly policyId: string,
+  ) {
     super(`sponsorship denied by ${denial.rule}: ${denial.reason}`);
     this.name = "SponsorshipDeniedError";
   }
@@ -64,6 +67,13 @@ export interface SponsorServiceDeps {
   readonly options: SponsorServiceOptions;
   /** Injected so evaluation is deterministic and testable. Unix seconds. */
   readonly now?: () => number;
+  /** Optional sink for sponsorship-outcome metrics. Absent in tests and when metrics are disabled. */
+  readonly metrics?: SponsorshipMetrics | undefined;
+}
+
+/** The metrics this service emits. A port so the service does not depend on the metrics facade. */
+export interface SponsorshipMetrics {
+  recordSponsorship(chainId: number, outcome: "issued" | "denied" | "error", committedWei?: bigint): void;
 }
 
 /**
@@ -113,6 +123,7 @@ export class SponsorService {
 
     const evaluation = await policyEngine.evaluate(policy, context);
     if (!evaluation.decision.allowed) {
+      this.#deps.metrics?.recordSponsorship(request.chainId, "denied");
       throw new SponsorshipDeniedError(evaluation.decision, policyId);
     }
 
@@ -160,6 +171,8 @@ export class SponsorService {
         validUntil: attestation.validUntil,
       });
 
+      this.#deps.metrics?.recordSponsorship(request.chainId, "issued", maxCost);
+
       return {
         paymaster: chain.config.paymaster,
         paymasterVerificationGasLimit: toHex(options.paymasterVerificationGasLimit),
@@ -178,6 +191,7 @@ export class SponsorService {
         },
       };
     } catch (error) {
+      this.#deps.metrics?.recordSponsorship(request.chainId, "error");
       // Best-effort refund. A failed release leaks the caller's budget until the window rolls,
       // which is bad; masking the original error with a release failure would be worse.
       await policyEngine.releaseReservations(policy, context).catch(() => undefined);
