@@ -171,7 +171,7 @@ and reversible, not silently skipped.
 
 ---
 
-## Known correctness caveat (documented, not a bug)
+## Known correctness caveat (documented, not a bug) tytyt
 
 **Spend caps over-reserve.** Until the reconciliation loop above exists, a spend cap charges the
 worst-case `maxCost` at sponsorship time. Real cost is always lower, so callers hit their cap sooner
