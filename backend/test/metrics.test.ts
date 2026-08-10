@@ -72,6 +72,27 @@ describe("PaymasterMetrics", () => {
     expect(out).toContain('paymaster_gas_committed_wei_total{chain="8453"} 1000000000000000');
   });
 
+  it("counts pre-auth rejections by reason and auth failures, flagging the ones that block", () => {
+    const m = new PaymasterMetrics();
+    m.recordIpRejection("throttled");
+    m.recordIpRejection("blocked");
+    m.recordAuthFailure(false);
+    m.recordAuthFailure(true);
+    const out = m.registry.render();
+    expect(out).toContain('paymaster_ip_rejections_total{reason="throttled"} 1');
+    expect(out).toContain('paymaster_ip_rejections_total{reason="blocked"} 1');
+    expect(out).toContain("paymaster_auth_failures_total 2");
+    // Only the failure that crossed the threshold counts as a block.
+    expect(out).toContain("paymaster_ip_blocks_total 1");
+  });
+
+  it("never labels an abuse series by IP, which a caller controls", () => {
+    const m = new PaymasterMetrics();
+    m.recordAuthFailure(true);
+    m.recordIpRejection("blocked");
+    expect(m.registry.render()).not.toMatch(/paymaster_(auth_failures|ip_blocks)_total\{/);
+  });
+
   it("reflects funding results into deposit/stake and threshold gauges", () => {
     const m = new PaymasterMetrics();
     const funding: PaymasterFunding = {

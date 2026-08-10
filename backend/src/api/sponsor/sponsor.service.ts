@@ -2,6 +2,7 @@ import {slice, toHex, type Address, type Hex} from "viem";
 
 import {calculateMaxCost} from "../../chain/gas.js";
 import type {ChainRegistry} from "../../chain/chainRegistry.js";
+import {noopTracer, withSpan, type Span, type Tracer} from "../../monitoring/tracing.js";
 import {decodeCallTargets} from "../../policy/callData.js";
 import type {PolicyContext, PolicyDenial} from "../../policy/context.js";
 import type {PolicyEngine} from "../../policy/engine.js";
@@ -69,6 +70,8 @@ export interface SponsorServiceDeps {
   readonly now?: () => number;
   /** Optional sink for sponsorship-outcome metrics. Absent in tests and when metrics are disabled. */
   readonly metrics?: SponsorshipMetrics | undefined;
+  /** Optional tracer. Defaults to the no-op, so tracing is free when it is off. */
+  readonly tracer?: Tracer | undefined;
 }
 
 /** The metrics this service emits. A port so the service does not depend on the metrics facade. */
@@ -92,13 +95,32 @@ export class SponsorService {
     this.#now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   }
 
+  /**
+   * Traced at this boundary rather than inside: one span per sponsorship, carrying the decision and
+   * the amount committed, is what makes a slow or denied request answerable from a trace alone. The
+   * span joins the HTTP server span above it through the ambient context, so no plumbing is needed.
+   */
   async sponsor(request: SponsorRequest, caller: CallerIdentity = {}): Promise<SponsorResponse> {
+    return withSpan(
+      this.#deps.tracer ?? noopTracer,
+      "sponsor",
+      {
+        kind: "internal",
+        attributes: {"paymaster.chain_id": request.chainId},
+        expected: (error) => error instanceof SponsorshipDeniedError,
+      },
+      (span) => this.#sponsor(request, caller, span),
+    );
+  }
+
+  async #sponsor(request: SponsorRequest, caller: CallerIdentity, span: Span): Promise<SponsorResponse> {
     const {chains, policies, policyEngine, signatureEngine, options} = this.#deps;
 
     // Throws UnknownChainError / ChainDisabledError, which the filter maps to 4xx.
     const chain = chains.get(request.chainId);
     const policyId = request.policyId ?? options.defaultPolicyId;
     const policy = policies.get(policyId);
+    span.setAttribute("paymaster.policy_id", policyId);
 
     const userOp = toPackedUserOperation(request.userOperation);
 
@@ -124,6 +146,11 @@ export class SponsorService {
     const evaluation = await policyEngine.evaluate(policy, context);
     if (!evaluation.decision.allowed) {
       this.#deps.metrics?.recordSponsorship(request.chainId, "denied");
+      // Attributes, not a span error: a denial is this service working correctly. The trace should
+      // show WHICH rule refused without the request being counted as a failure.
+      span.setAttribute("paymaster.outcome", "denied");
+      span.setAttribute("paymaster.denial_rule", evaluation.decision.rule);
+      span.setAttribute("paymaster.denial_code", evaluation.decision.code);
       throw new SponsorshipDeniedError(evaluation.decision, policyId);
     }
 
@@ -172,6 +199,9 @@ export class SponsorService {
       });
 
       this.#deps.metrics?.recordSponsorship(request.chainId, "issued", maxCost);
+      span.setAttribute("paymaster.outcome", "issued");
+      // A string: wei exceeds the integer range a tracing backend will render faithfully.
+      span.setAttribute("paymaster.max_cost_wei", maxCost.toString());
 
       return {
         paymaster: chain.config.paymaster,

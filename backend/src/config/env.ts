@@ -117,6 +117,46 @@ export const envSchema = z
     METRICS_ENABLED: boolFromEnv(true),
 
     /**
+     * Alert delivery.
+     *
+     * Without a URL the only sink is the application log, which is a safe default but does not wake
+     * anyone. Set the URL to add a pager: `pagerduty` uses the Events API v2 (resolutions close the
+     * incident the alert opened), `slack` posts to an incoming webhook, `generic` posts our own JSON
+     * to an endpoint you write. The log sink always stays composed alongside it.
+     */
+    ALERT_WEBHOOK_URL: z.string().url().optional(),
+    ALERT_WEBHOOK_FORMAT: z.enum(["generic", "pagerduty", "slack"]).default("generic"),
+    /** PagerDuty integration (routing) key. Required when the format is `pagerduty`. Never logged. */
+    ALERT_WEBHOOK_ROUTING_KEY: z.string().min(1).optional(),
+    /** Optional HMAC secret for the `generic` format, signed exactly as inbound requests are. */
+    ALERT_WEBHOOK_SIGNING_SECRET: z.string().min(32, "must be at least 32 characters").optional(),
+    /** `critical` pages only on the conditions that stop sponsorship outright. */
+    ALERT_WEBHOOK_MIN_SEVERITY: z.enum(["warning", "critical"]).default("warning"),
+    ALERT_WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(5_000),
+    ALERT_WEBHOOK_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
+
+    /**
+     * Distributed tracing (OTLP/HTTP JSON to any OpenTelemetry collector).
+     *
+     * Off by default: tracing needs somewhere to send spans, and a service that silently posts to a
+     * nonexistent collector every second is worse than one that does not trace. Enabling requires an
+     * endpoint — enforced below.
+     */
+    OTEL_TRACES_ENABLED: boolFromEnv(false),
+    /** Collector base URL, e.g. http://otel-collector:4318. `/v1/traces` is appended if absent. */
+    OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
+    /** Extra export headers as `k=v,k=v` — the standard OTel encoding. Typically an API token. */
+    OTEL_EXPORTER_OTLP_HEADERS: z.string().optional(),
+    OTEL_SERVICE_NAME: z.string().min(1).default("paymaster"),
+    /** Head-sampling probability. 1 traces everything; lower it before the collector, not after. */
+    OTEL_TRACES_SAMPLE_RATIO: z.coerce.number().min(0).max(1).default(1),
+    OTEL_BSP_SCHEDULE_DELAY_MS: z.coerce.number().int().min(100).max(60_000).default(5_000),
+    OTEL_BSP_MAX_EXPORT_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(256),
+    /** Hard cap on queued spans. Past it spans are dropped, never buffered without limit. */
+    OTEL_BSP_MAX_QUEUE_SIZE: z.coerce.number().int().min(1).max(100_000).default(2_048),
+    OTEL_EXPORT_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(5_000),
+
+    /**
      * HMAC secret for operator session tokens (JWT admin auth). Optional: when unset, only API keys
      * authenticate and POST /admin/auth/token returns 503. At least 32 chars — a short HMAC secret
      * is a weak one. Never logged.
@@ -161,6 +201,28 @@ export const envSchema = z
         path: ["SPONSORSHIP_SIGNER_KEY"],
       });
     }
+
+    // A pager configured with no way to route the page is a pager that will not page. Caught at
+    // startup, because the alternative is discovering it during the incident it was meant to catch.
+    if (
+      env.ALERT_WEBHOOK_URL !== undefined &&
+      env.ALERT_WEBHOOK_FORMAT === "pagerduty" &&
+      env.ALERT_WEBHOOK_ROUTING_KEY === undefined
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "ALERT_WEBHOOK_FORMAT=pagerduty requires ALERT_WEBHOOK_ROUTING_KEY",
+        path: ["ALERT_WEBHOOK_ROUTING_KEY"],
+      });
+    }
+
+    if (env.OTEL_TRACES_ENABLED && env.OTEL_EXPORTER_OTLP_ENDPOINT === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message: "OTEL_TRACES_ENABLED requires OTEL_EXPORTER_OTLP_ENDPOINT",
+        path: ["OTEL_EXPORTER_OTLP_ENDPOINT"],
+      });
+    }
   });
 
 /** Parses an env flag: unset falls back to `defaultValue`; "false"/"0"/"no" are false, else true. */
@@ -188,6 +250,26 @@ export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
     throw new EnvValidationError(result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`));
   }
   return result.data;
+}
+
+/**
+ * Parses `OTEL_EXPORTER_OTLP_HEADERS` — `k=v,k=v`, the encoding the OTel specification defines.
+ *
+ * Lenient by design: a malformed pair is skipped rather than fatal. These headers usually carry a
+ * telemetry token, and refusing to start a paymaster because an observability credential was pasted
+ * with a stray comma is the wrong trade — the export failure is visible in the log either way.
+ */
+export function parseOtlpHeaders(value: string | undefined): Record<string, string> {
+  if (value === undefined || value.trim() === "") return {};
+  const headers: Record<string, string> = {};
+  for (const pair of value.split(",")) {
+    const index = pair.indexOf("=");
+    if (index <= 0) continue;
+    const key = pair.slice(0, index).trim();
+    const headerValue = pair.slice(index + 1).trim();
+    if (key !== "" && headerValue !== "") headers[key] = headerValue;
+  }
+  return headers;
 }
 
 const chainJsonSchema = z.array(

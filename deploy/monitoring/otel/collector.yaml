@@ -1,0 +1,48 @@
+# OpenTelemetry Collector — development configuration.
+#
+# The backend posts OTLP/HTTP JSON to :4318/v1/traces. This terminates it and, by default, prints a
+# summary to the container log so a developer can confirm end-to-end tracing works with nothing else
+# installed. Point it at a real backend by uncommenting one of the exporters below; the service
+# itself does not change, which is the reason a collector sits here at all.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  # Bounds the collector's own memory before it bounds the host's.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  debug:
+    verbosity: normal
+
+  # Tempo:
+  # otlp:
+  #   endpoint: tempo:4317
+  #   tls: {insecure: true}
+  #
+  # Jaeger (accepts OTLP directly since v1.35):
+  # otlp/jaeger:
+  #   endpoint: jaeger:4317
+  #   tls: {insecure: true}
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+  telemetry:
+    logs:
+      level: info

@@ -17,9 +17,12 @@ import {InMemoryApiKeyStore} from "../auth/inMemoryApiKeyStore.js";
 import {JwtService} from "../auth/jwt.js";
 import {ChainRegistry} from "../chain/chainRegistry.js";
 import {ChainRegistryTokenBalanceReader} from "../chain/tokenBalanceReader.js";
-import {LoggingAlerter, type Alerter} from "../monitoring/alerting.js";
+import {CompositeAlerter, LoggingAlerter, type Alerter} from "../monitoring/alerting.js";
+import {WebhookAlerter} from "../monitoring/webhookAlerter.js";
 import {BackgroundServiceHost, type BackgroundService} from "../monitoring/backgroundService.js";
 import {FundingMonitor} from "../monitoring/fundingMonitor.js";
+import {OtlpTracer} from "../monitoring/otlpTracer.js";
+import {noopTracer, type Tracer} from "../monitoring/tracing.js";
 import {SpendReconciler} from "../reconciliation/spendReconciler.js";
 import {ChainRegistryEventSource} from "../reconciliation/chainEventSource.js";
 import {PostgresSpendReconciliationStore} from "../db/postgresSpendReconciliationStore.js";
@@ -32,7 +35,7 @@ import {SignatureEngine} from "../signature/signatureEngine.js";
 import {LocalSponsorshipSigner, type SponsorshipSigner} from "../signature/signer.js";
 import {KmsSponsorshipSigner} from "../signature/kmsSigner.js";
 import {AwsKmsClient} from "../signature/awsKmsClient.js";
-import {parseChainsJson, type Env} from "../config/env.js";
+import {parseChainsJson, parseOtlpHeaders, type Env} from "../config/env.js";
 import {API_KEY_AUTHENTICATOR, JWT_VERIFIER, SECURITY_IP_THROTTLE} from "./guards/apiKey.guard.js";
 import {AuthController} from "./admin/auth.controller.js";
 import {HealthController, HEALTH_DEPS, type HealthDeps} from "./health/health.controller.js";
@@ -72,6 +75,8 @@ export interface AppDependencies {
   readonly ipThrottle?: IpThrottle | undefined;
   /** HMAC request-signature verifier. Absent when REQUEST_SIGNING_SECRET is not set. */
   readonly signatureVerifier?: RequestSignatureVerifier | undefined;
+  /** Tracer. The no-op tracer when OTEL_TRACES_ENABLED is false, so callers never null-check. */
+  readonly tracer?: Tracer | undefined;
   readonly env: Env;
 }
 
@@ -95,6 +100,7 @@ export class AppModule {
       signatureEngine: new SignatureEngine(deps.signer),
       sponsorships: deps.sponsorships,
       metrics,
+      tracer: deps.tracer,
       options: {
         validitySeconds: deps.env.SPONSORSHIP_VALIDITY_SECONDS,
         paymasterVerificationGasLimit: deps.env.PAYMASTER_VERIFICATION_GAS_LIMIT,
@@ -153,9 +159,11 @@ export async function buildDependencies(
   makePolicies: (quotas: QuotaStore) => readonly Policy[],
 ): Promise<AppDependencies> {
   // Shared across the circuit breakers, funding monitor, reconciler, and IP throttle so every
-  // subsystem alerts through one sink. LoggingAlerter is the safe default; compose a pager in here.
-  const alerter = new LoggingAlerter();
+  // subsystem alerts through one sink. The log sink is always present — a pager is composed in
+  // ALONGSIDE it, never instead of it, so an alert whose delivery fails is still recorded.
+  const alerter = buildAlerter(env);
   const metrics = env.METRICS_ENABLED ? new PaymasterMetrics() : undefined;
+  const tracer = buildTracer(env);
 
   // Each chain's RPC breaker reports open/closed through here: a critical alert when a chain trips,
   // resolved when it recovers, plus a gauge. The circuit name is `rpc:<chainId>`.
@@ -207,6 +215,9 @@ export async function buildDependencies(
   await policySource.reload();
 
   const backgroundServices = buildBackgroundServices(env, {chains, policies: policySource, pool, metrics}, alerter);
+  // The tracer's flush loop is a background service like any other, so shutdown drains the last
+  // spans through the same lifecycle that stops the monitors.
+  if (tracer instanceof OtlpTracer) backgroundServices.push(tracer);
 
   const jwt =
     env.ADMIN_JWT_SECRET === undefined
@@ -229,6 +240,7 @@ export async function buildDependencies(
           blockWindowSeconds: env.IP_ABUSE_BLOCK_WINDOW_SECONDS,
         },
         alerter,
+        metrics,
       )
     : undefined;
   const signatureVerifier =
@@ -243,6 +255,7 @@ export async function buildDependencies(
     policies: policySource,
     backgroundServices,
     metrics,
+    tracer,
     jwt,
     ipThrottle,
     signatureVerifier,
@@ -256,6 +269,51 @@ export async function buildDependencies(
     quotasAreLocal: redis === undefined,
     env,
   };
+}
+
+/**
+ * Composes the alert sinks.
+ *
+ * The log sink is unconditional and a webhook is added to it, never substituted for it. That
+ * ordering is the point: `CompositeAlerter` isolates each sink, so a pager outage degrades to a
+ * logged alert rather than to no alert — and the pager outage itself is logged by the same path.
+ */
+function buildAlerter(env: Env): Alerter {
+  const logging = new LoggingAlerter();
+  if (env.ALERT_WEBHOOK_URL === undefined) return logging;
+
+  const webhook = new WebhookAlerter({
+    url: env.ALERT_WEBHOOK_URL,
+    format: env.ALERT_WEBHOOK_FORMAT,
+    timeoutMs: env.ALERT_WEBHOOK_TIMEOUT_MS,
+    retries: env.ALERT_WEBHOOK_RETRIES,
+    minSeverity: env.ALERT_WEBHOOK_MIN_SEVERITY,
+    routingKey: env.ALERT_WEBHOOK_ROUTING_KEY,
+    signingSecret: env.ALERT_WEBHOOK_SIGNING_SECRET,
+    source: env.OTEL_SERVICE_NAME,
+  });
+  return new CompositeAlerter([logging, webhook]);
+}
+
+/**
+ * Builds the tracer, or the no-op when tracing is off.
+ *
+ * Returning a working no-op rather than `undefined` is deliberate: instrumented code then has one
+ * code path instead of two, and "tracing disabled" cannot become a source of null-check bugs on the
+ * sponsorship path.
+ */
+function buildTracer(env: Env): Tracer {
+  if (!env.OTEL_TRACES_ENABLED || env.OTEL_EXPORTER_OTLP_ENDPOINT === undefined) return noopTracer;
+  return new OtlpTracer({
+    endpoint: env.OTEL_EXPORTER_OTLP_ENDPOINT,
+    serviceName: env.OTEL_SERVICE_NAME,
+    headers: parseOtlpHeaders(env.OTEL_EXPORTER_OTLP_HEADERS),
+    sampleRatio: env.OTEL_TRACES_SAMPLE_RATIO,
+    maxQueueSize: env.OTEL_BSP_MAX_QUEUE_SIZE,
+    maxBatchSize: env.OTEL_BSP_MAX_EXPORT_BATCH_SIZE,
+    flushIntervalMs: env.OTEL_BSP_SCHEDULE_DELAY_MS,
+    timeoutMs: env.OTEL_EXPORT_TIMEOUT_MS,
+  });
 }
 
 /**
@@ -296,7 +354,7 @@ function buildBackgroundServices(
     metrics: PaymasterMetrics | undefined;
   },
   alerter: Alerter = new LoggingAlerter(),
-): readonly BackgroundService[] {
+): BackgroundService[] {
   const services: BackgroundService[] = [];
 
   if (env.FUNDING_MONITOR_ENABLED && deps.chains.allChainIds.length > 0) {

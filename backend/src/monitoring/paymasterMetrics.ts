@@ -1,4 +1,5 @@
 import type {PolicyEvaluation, PolicyObserver} from "../policy/engine.js";
+import type {IpThrottleMetrics} from "../security/ipThrottle.js";
 import type {FundingResult} from "./fundingMonitor.js";
 import {MetricsRegistry, type Counter, type Gauge, type Histogram} from "./metrics.js";
 
@@ -14,7 +15,7 @@ import {MetricsRegistry, type Counter, type Gauge, type Histogram} from "./metri
  * metrics that only the backend can see: which policy denied, how much was committed, whether each
  * chain's funding is healthy.
  */
-export class PaymasterMetrics implements PolicyObserver {
+export class PaymasterMetrics implements PolicyObserver, IpThrottleMetrics {
   readonly registry: MetricsRegistry;
 
   readonly #decisions: Counter;
@@ -28,6 +29,9 @@ export class PaymasterMetrics implements PolicyObserver {
   readonly #stake: Gauge;
   readonly #fundingBelow: Gauge;
   readonly #circuit: Gauge;
+  readonly #authFailures: Counter;
+  readonly #ipRejections: Counter;
+  readonly #ipBlocks: Counter;
 
   constructor(registry: MetricsRegistry = new MetricsRegistry()) {
     this.registry = registry;
@@ -55,6 +59,35 @@ export class PaymasterMetrics implements PolicyObserver {
       "paymaster_chain_circuit_open",
       "1 when a chain's RPC circuit breaker is not closed (open or half-open), else 0.",
     );
+    // The abuse series. Deliberately unlabelled by IP: an attacker chooses their source address, so
+    // an ip label would let them mint unbounded series and exhaust the scraper's memory. The rate of
+    // these counters is what an attack-detection rule needs; WHICH ip is in the alert and the log.
+    this.#authFailures = registry.counter(
+      "paymaster_auth_failures_total",
+      "Authentication failures, counted for abuse detection.",
+    );
+    this.#ipRejections = registry.counter(
+      "paymaster_ip_rejections_total",
+      "Requests rejected pre-authentication, by reason (throttled or blocked).",
+    );
+    this.#ipBlocks = registry.counter(
+      "paymaster_ip_blocks_total",
+      "IPs newly blocked for crossing the auth-failure threshold.",
+    );
+  }
+
+  /** IpThrottleMetrics: a request refused before authentication ran. */
+  recordIpRejection(reason: "throttled" | "blocked"): void {
+    this.#ipRejections.inc({reason});
+  }
+
+  /**
+   * IpThrottleMetrics: one authentication failure, and whether it was the one that tripped a block.
+   * The block counter is the sharp signal — failures happen; a block means someone is grinding.
+   */
+  recordAuthFailure(blocked: boolean): void {
+    this.#authFailures.inc();
+    if (blocked) this.#ipBlocks.inc();
   }
 
   /** Reflects a chain RPC circuit-breaker state change. 0 = closed (healthy), 1 = open/half-open. */

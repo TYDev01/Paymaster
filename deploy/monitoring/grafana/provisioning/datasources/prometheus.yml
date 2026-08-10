@@ -1,0 +1,20 @@
+# Grafana datasource provisioning.
+#
+# Provisioned as a file rather than clicked in, so a fresh Grafana comes up already pointing at the
+# right Prometheus and the dashboard's `${datasource}` variable resolves without anyone configuring
+# anything. `isDefault` matters: it is what makes the variable's empty `current` pick this one.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: paymaster-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Matches prometheus.yml's scrape_interval, so Grafana's auto step never asks for finer
+      # resolution than the data actually has.
+      timeInterval: 15s

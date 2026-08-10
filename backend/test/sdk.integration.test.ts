@@ -27,6 +27,7 @@ import type {Env} from "../src/config/env.js";
 import {packUint128Pair, type PackedUserOperation} from "../src/domain/userOperation.js";
 import {deploy, loadArtifact, startAnvil, type AnvilInstance} from "./support/anvil.js";
 import {rundlerAvailable, startBundler, type BundlerInstance} from "./support/bundler.js";
+import {testEnv} from "./support/env.js";
 
 /**
  * The SDK against the WHOLE platform: SDK -> real backend (sponsor) -> real bundler (send) ->
@@ -218,37 +219,7 @@ describeBundler("SDK drives the whole platform (SDK -> backend -> bundler -> cha
     });
     await policySource.reload();
 
-    const env: Env = {
-      NODE_ENV: "test",
-      PORT: 0,
-      HOST: "127.0.0.1",
-      SPONSORSHIP_SIGNER_KEY: signerKey,
-      CHAINS: "[]",
-      SPONSORSHIP_VALIDITY_SECONDS: 300,
-      PAYMASTER_VERIFICATION_GAS_LIMIT: 300_000n,
-      POSTOP_GAS_LIMIT: 50_000n,
-      DEFAULT_POLICY_ID: "default",
-      DATABASE_MAX_CONNECTIONS: 5,
-      DATABASE_MIGRATE_ON_BOOT: true,
-      FUNDING_MONITOR_ENABLED: false,
-      FUNDING_MONITOR_INTERVAL_MS: 60_000,
-      FUNDING_MONITOR_REALERT_MS: 3_600_000,
-      RECONCILER_ENABLED: false,
-      RECONCILER_INTERVAL_MS: 60_000,
-      RECONCILER_CONFIRMATIONS: 5,
-      RECONCILER_MAX_BLOCK_RANGE: 2_000,
-      RECONCILER_INITIAL_LOOKBACK_BLOCKS: 5_000,
-      METRICS_ENABLED: false,
-      IP_THROTTLE_ENABLED: false,
-      IP_THROTTLE_REQUESTS_PER_WINDOW: 100,
-      IP_THROTTLE_WINDOW_SECONDS: 60,
-      IP_ABUSE_AUTH_FAILURE_THRESHOLD: 20,
-      IP_ABUSE_BLOCK_WINDOW_SECONDS: 900,
-      REQUEST_SIGNING_MAX_SKEW_SECONDS: 300,
-      ADMIN_JWT_TTL_SECONDS: 900,
-      ADMIN_JWT_ISSUER: "paymaster",
-      ADMIN_JWT_AUDIENCE: "paymaster-admin",
-    };
+    const env: Env = testEnv({SPONSORSHIP_SIGNER_KEY: signerKey, DATABASE_MAX_CONNECTIONS: 5});
     const deps: AppDependencies = {
       chains: ChainRegistry.fromConfigs([chainConfig]),
       policies: policySource,

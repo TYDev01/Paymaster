@@ -9,7 +9,18 @@ Legend: 🔴 blocks production · 🟡 spec-required, not blocking · 🟢 harde
 
 ---
 
-## Completed this pass
+## Completed: monitoring pass
+
+- ✅ **Full monitoring stack** — Prometheus alert rules, a provisioned Grafana dashboard, OTLP
+  tracing with W3C propagation, a real pager sink (PagerDuty / Slack / signed webhook) behind the
+  existing `Alerter` port, abuse metrics for attack detection, and a `--profile monitoring` compose
+  stack. Detail in the monitoring section below; operator documentation in
+  [docs/MONITORING.md](MONITORING.md).
+- ✅ **`testEnv` helper** (`test/support/env.ts`) — the three hand-written `Env` literals in the test
+  suite are gone. They had to be edited whenever a variable was added, which made adding one look
+  like it broke the tests; the helper runs the real schema instead.
+
+## Completed: hardening pass
 
 - ✅ **KMS-backed signer** — `KmsSponsorshipSigner` over a `KmsClient` port, with an `AwsKmsClient`
   adapter. The key never enters the process; DER→`r‖s‖v` conversion, low-`s` normalisation and `v`
@@ -87,13 +98,36 @@ by default (chart-managed only for dev). Rendered YAML is documented in `deploy/
 Not linted here — `helm` is not installed in this environment — so run `helm lint` / `helm template`
 before first use.
 
-### 🟡 Monitoring stack (Prometheus / Grafana / OpenTelemetry) — PARTIAL
-The **backend now exports `/metrics`** (`backend/src/monitoring/metrics.ts` +
-`paymasterMetrics.ts`, controller at `metrics.controller.ts`): policy decisions, denials by rule,
-sponsorships by outcome, gas committed, chain health, and deposit/stake — td.md's list. An `Alerter`
-port exists and the funding monitor already raises low-deposit / RPC-unreadable alerts through it.
-Still to do: Grafana dashboards, OpenTelemetry tracing, and the remaining alert *rules* (high error
-rate, attack detection) plus a real pager sink behind `Alerter` (only `LoggingAlerter` ships).
+### ✅ Monitoring stack (Prometheus / Grafana / OpenTelemetry) — DONE
+Documented end to end in [docs/MONITORING.md](MONITORING.md), including a runbook entry per alert.
+
+- **Metrics** — `/metrics` exports policy decisions, denials by rule, sponsorships by outcome, gas
+  committed, chain health, deposit/stake, plus the abuse series added this pass
+  (`paymaster_auth_failures_total`, `paymaster_ip_rejections_total`, `paymaster_ip_blocks_total`),
+  which is what gives the attack-detection rules a rate to threshold against. Nothing is labelled by
+  an address, key or IP — caller-controlled labels are an unbounded-cardinality hazard.
+- **Alert rules** — `deploy/monitoring/prometheus/alerts.yml`: 15 rules over availability, funding,
+  errors and abuse, covering exactly what a single observation cannot see (rates, ratios, trends,
+  absence). The backend keeps paging directly for what it can see itself, so the two do not
+  double-page; only the funding rules are duplicated deliberately, as a backstop for the case where
+  the backend's own alert egress is broken. Shipped to Kubernetes by a `PrometheusRule` template
+  that injects that same file via `--set-file`, so there is one copy of the rules, not two.
+- **Grafana** — `deploy/monitoring/grafana/`: a provisioned dashboard (sponsorship, chain health,
+  funding, abuse) with a datasource and a read-only dashboard provider.
+- **Pager sink** — `WebhookAlerter` (`backend/src/monitoring/webhookAlerter.ts`) delivers over
+  PagerDuty Events API v2 (the alert key is the dedup key, so a resolution closes the incident the
+  alert opened), Slack, or a generic HMAC-signed JSON endpoint. Composed *alongside* `LoggingAlerter`,
+  never instead of it. Tested in `test/webhookAlerter.test.ts`.
+- **Tracing** — OTLP/HTTP JSON with W3C trace-context propagation, written directly rather than
+  through the OTel SDK (`tracing.ts`, `otlpTracer.ts`, `tracingPlugin.ts`). Server span per request,
+  child span per sponsorship carrying chain, policy and outcome; head sampling inherited across the
+  whole trace; bounded queue and bounded blocking. Tested in `test/tracing.test.ts`.
+- **Local stack** — `docker compose --profile monitoring up` brings up Prometheus, Grafana and an
+  OTel collector. Configuration-only: the backend exports metrics and spans whether or not they run.
+
+Still open: **Alertmanager routing** is not configured (routing/silencing/escalation are deployment
+decisions, and the compose stack deliberately does not page), and the `PaymasterGasCommitmentSurge`
+and `PaymasterDenialSurge` thresholds ship as placeholders that must be tuned to real traffic.
 
 ### 🟡 Remaining Redis uses
 Redis currently backs quotas only. td.md also lists: nonce cache, policy cache, temporary-signature
@@ -120,10 +154,18 @@ Flat-config ESLint (`eslint.config.js`, typescript-eslint recommended + prettier
 `format` / `format:check` scripts and CI steps in `.github/workflows/test.yml`. The whole tree passes
 both.
 
-### 🟡 Measure test coverage — TOOLING ADDED
-`test:coverage` (`vitest run --coverage`, `@vitest/coverage-v8`) is wired in both workspaces. A real
-project-wide figure still needs the full suite — including the Postgres/Redis/anvil/rundler-backed
-tests — to run, so **no number is cited here**. `forge coverage` for contracts is still to add.
+### 🟡 Measure test coverage — MEASURED (backend), contracts pending
+The full backend suite now runs in this environment — 420 tests across 24 files, including the
+Postgres, Redis, anvil and rundler-backed ones — so a real figure can be cited:
+
+| | Statements | Branches | Functions | Lines |
+| --- | --- | --- | --- | --- |
+| Backend (`src/`) | 80.99% | 89.07% | 83.03% | 80.99% |
+
+Measured with `npm run test:coverage` (`vitest run --coverage`, `@vitest/coverage-v8`). The gaps are
+where you would expect them and are honest ones: `awsKmsClient.ts` (16% — needs real KMS),
+`securityPlugin.ts` (0% — Fastify hook wiring, exercised only through a booted server),
+`chainEventSource.ts` (36%). `forge coverage` for the contracts is still to add.
 
 ### ✅ Additional security controls (td.md list) — DONE
 All four, under `backend/src/security/` (tested in `test/{circuitBreaker,ipThrottle,requestSignature}.test.ts`):
@@ -171,8 +213,12 @@ and reversible, not silently skipped.
 
 ---
 
-## Known correctness caveat (documented, not a bug) tytyt
+## Known correctness caveat (documented, not a bug)
 
-**Spend caps over-reserve.** Until the reconciliation loop above exists, a spend cap charges the
-worst-case `maxCost` at sponsorship time. Real cost is always lower, so callers hit their cap sooner
-than a true daily budget would imply. This is safe (it errs toward spending less) but is not exact.
+**Some spend caps still over-reserve.** A spend cap charges the worst-case `maxCost` at sponsorship
+time; real cost is always lower. `SpendReconciler` now trues the wallet, chain, global and apiKey
+caps back up to actual on-chain cost, so those are exact once an operation settles. The **per-IP and
+per-target** spend caps stay conservative, because a `sponsorships` row records neither the client IP
+nor the call target and so cannot be correlated back to the counter that charged it. Callers on those
+two caps hit their limit sooner than a true daily budget would imply — safe (it errs toward spending
+less), but not exact.

@@ -34,6 +34,19 @@ export type IpDecision =
   | {readonly allowed: true}
   | {readonly allowed: false; readonly reason: "throttled" | "blocked"; readonly retryAfterSeconds: number};
 
+/**
+ * The abuse counters this emits. A port, so the throttle does not depend on the metrics facade.
+ *
+ * Attack detection is an alerting question, and an alert rule needs a rate to threshold against —
+ * the `Alerter` fires once per blocked IP, which pages but does not describe the shape of a
+ * campaign. These counters do.
+ */
+export interface IpThrottleMetrics {
+  recordIpRejection(reason: "throttled" | "blocked"): void;
+  /** `blocked` is true only for the failure that crossed the threshold. */
+  recordAuthFailure(blocked: boolean): void;
+}
+
 const RATE_PREFIX = "sec:iprate";
 const FAIL_PREFIX = "sec:ipfail";
 // A ceiling far above the block threshold: the failure counter is only ever read against the
@@ -44,11 +57,13 @@ export class IpThrottle {
   readonly #store: QuotaStore;
   readonly #options: IpThrottleOptions;
   readonly #alerter: Alerter | undefined;
+  readonly #metrics: IpThrottleMetrics | undefined;
 
-  constructor(store: QuotaStore, options: IpThrottleOptions, alerter?: Alerter) {
+  constructor(store: QuotaStore, options: IpThrottleOptions, alerter?: Alerter, metrics?: IpThrottleMetrics) {
     this.#store = store;
     this.#options = options;
     this.#alerter = alerter;
+    this.#metrics = metrics;
   }
 
   /**
@@ -57,6 +72,7 @@ export class IpThrottle {
    */
   async check(ip: string, now: number): Promise<IpDecision> {
     if (await this.#isBlocked(ip, now)) {
+      this.#metrics?.recordIpRejection("blocked");
       return {allowed: false, reason: "blocked", retryAfterSeconds: retryAfter(now, this.#options.blockWindowSeconds)};
     }
 
@@ -68,6 +84,7 @@ export class IpThrottle {
       now,
     });
     if (!outcome.consumed) {
+      this.#metrics?.recordIpRejection("throttled");
       return {allowed: false, reason: "throttled", retryAfterSeconds: Math.max(1, outcome.resetsAt - now)};
     }
     return {allowed: true};
@@ -89,6 +106,7 @@ export class IpThrottle {
 
     const threshold = BigInt(this.#options.authFailureThreshold);
     // Fire only on the exact crossing: usage == threshold means this failure is the one that blocked.
+    this.#metrics?.recordAuthFailure(outcome.usage === threshold);
     if (outcome.usage === threshold) {
       this.#alerter?.fire({
         key: `ip-blocked:${ip}`,

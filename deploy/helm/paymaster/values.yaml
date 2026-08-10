@@ -84,6 +84,22 @@ serviceMonitor:
   scrapeTimeout: 10s
   labels: {}
 
+# Prometheus Operator PrometheusRule — the alert rules that need a time series to evaluate (rates,
+# ratios, trends, absence). The backend pages by itself for what it can see directly.
+#
+# The rules live in ONE file, deploy/monitoring/prometheus/alerts.yml, shared with the compose
+# stack. Load it at install time rather than copying it here:
+#
+#   --set prometheusRule.enabled=true \
+#   --set-file prometheusRule.rulesYaml=deploy/monitoring/prometheus/alerts.yml
+prometheusRule:
+  enabled: false
+  # The whole alerts.yml file, injected with --set-file. Leave empty and it must come from `groups`.
+  rulesYaml: ""
+  # Structured alternative, for a values-file workflow that cannot use --set-file.
+  groups: []
+  labels: {}
+
 nodeSelector: {}
 tolerations: []
 affinity: {}
@@ -119,6 +135,23 @@ config:
     initialLookbackBlocks: 5000
 
   metricsEnabled: true
+
+  # OTLP tracing. Off by default: enabling it without a collector to receive spans just produces a
+  # failed POST every few seconds. Point `endpoint` at a collector (or an agent DaemonSet) and lower
+  # `sampleRatio` at the source once volume justifies it.
+  tracing:
+    enabled: false
+    endpoint: "http://otel-collector.observability:4318"
+    serviceName: "" # defaults to the release fullname
+    sampleRatio: 1
+
+  # Pager delivery. The log sink is always present; this composes a webhook ALONGSIDE it.
+  # format: generic | pagerduty | slack. PagerDuty additionally needs ALERT_WEBHOOK_ROUTING_KEY,
+  # which is a credential and therefore belongs in extraEnv from a Secret, not here.
+  alerting:
+    webhookUrl: ""
+    format: ""
+    minSeverity: "warning"
 
   jwt:
     # When true, ADMIN_JWT_SECRET is expected in the secret and /admin/auth/token is enabled.

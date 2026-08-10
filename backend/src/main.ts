@@ -8,6 +8,7 @@ import {AppModule, buildDependencies} from "./api/app.module.js";
 import {DomainErrorFilter} from "./api/filters/domainError.filter.js";
 import {parseEnv} from "./config/env.js";
 import {defaultPolicies} from "./config/defaultPolicies.js";
+import {registerTracing} from "./monitoring/tracingPlugin.js";
 import {registerSecurity} from "./security/securityPlugin.js";
 
 /**
@@ -50,9 +51,15 @@ export async function bootstrap(): Promise<NestFastifyApplication> {
     rawBody: true,
   });
 
+  const fastify = app.getHttpAdapter().getInstance();
+
+  // Tracing first, so the server span brackets the edge security below it: a request rejected by
+  // the throttle is exactly the kind you want a span for.
+  if (deps.tracer !== undefined) registerTracing(fastify, deps.tracer);
+
   // Edge security BEFORE authentication: pre-auth IP throttle/abuse block, and HMAC signature
   // verification. Registered on the underlying Fastify instance so it runs ahead of Nest guards.
-  registerSecurity(app.getHttpAdapter().getInstance(), {
+  registerSecurity(fastify, {
     ipThrottle: deps.ipThrottle,
     signatureVerifier: deps.signatureVerifier,
   });
@@ -65,6 +72,11 @@ export async function bootstrap(): Promise<NestFastifyApplication> {
   logger.log(`sponsorship API listening on ${env.HOST}:${env.PORT}`);
   logger.log(`serving chains: ${deps.chains.enabledChainIds.join(", ") || "<none enabled>"}`);
   logger.log(`signer: ${deps.signer.address}`);
+  if (env.OTEL_TRACES_ENABLED) {
+    logger.log(`tracing: OTLP to ${env.OTEL_EXPORTER_OTLP_ENDPOINT} at ${env.OTEL_TRACES_SAMPLE_RATIO} sampling`);
+  }
+  // The format, never the URL: a Slack incoming-webhook URL is itself the credential.
+  if (env.ALERT_WEBHOOK_URL !== undefined) logger.log(`alerting: ${env.ALERT_WEBHOOK_FORMAT} webhook + log`);
 
   return app;
 }

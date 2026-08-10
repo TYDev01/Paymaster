@@ -1,0 +1,36 @@
+{{- if .Values.prometheusRule.enabled }}
+{{/*
+Prometheus Operator PrometheusRule. Requires the CRD, so it is off by default for the same reason
+the ServiceMonitor is.
+
+The rules themselves are NOT duplicated into values.yaml. deploy/monitoring/prometheus/alerts.yml is
+the one canonical copy — the same file the docker-compose stack loads — and it is injected whole:
+
+  helm install paymaster deploy/helm/paymaster \
+    --set prometheusRule.enabled=true \
+    --set-file prometheusRule.rulesYaml=deploy/monitoring/prometheus/alerts.yml
+
+That works because the file's top-level key is `groups:`, which is exactly what a PrometheusRule
+`spec` expects. A second copy of a hundred alert expressions in values.yaml would drift from the
+first within a release or two, and drifted alert rules are worse than absent ones.
+*/}}
+{{- if and (not .Values.prometheusRule.rulesYaml) (not .Values.prometheusRule.groups) }}
+{{- fail "prometheusRule.enabled needs rules: pass --set-file prometheusRule.rulesYaml=deploy/monitoring/prometheus/alerts.yml, or set prometheusRule.groups" }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "paymaster.fullname" . }}
+  labels:
+    {{- include "paymaster.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+{{- if .Values.prometheusRule.rulesYaml }}
+{{ .Values.prometheusRule.rulesYaml | indent 2 }}
+{{- else }}
+  groups:
+    {{- toYaml .Values.prometheusRule.groups | nindent 4 }}
+{{- end }}
+{{- end }}

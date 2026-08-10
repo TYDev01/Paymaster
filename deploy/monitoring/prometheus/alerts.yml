@@ -1,0 +1,195 @@
+# Alert rules over the paymaster's metrics.
+#
+# Division of labour, deliberately: the backend pages directly (ALERT_WEBHOOK_URL) for conditions it
+# can see in a single observation — a deposit under its threshold, an RPC circuit tripping, an IP
+# crossing the abuse threshold. These rules cover what only a time series can see: RATES (errors per
+# second), RATIOS (errors over total), TRENDS (a deposit heading for zero), and ABSENCE (nothing has
+# been sponsored, or the process is not being scraped at all). Duplicating the first kind here would
+# double-page; skipping the second kind would leave the slow failures uncovered.
+#
+# Every threshold marked `TUNE` depends on your traffic and is set to a placeholder. Rules that are
+# not tuned are rules that get muted, which is worse than not having them.
+#
+# Runbook links point at docs/MONITORING.md, which describes what each condition means and what to
+# do about it.
+
+groups:
+  - name: paymaster-availability
+    rules:
+      - alert: PaymasterDown
+        expr: up{job="paymaster-backend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Paymaster backend is not being scraped"
+          description: "{{ $labels.instance }} has failed scrapes for 2m. No sponsorship is being served if this is the only replica."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymasterdown"
+
+      - alert: PaymasterChainUnhealthy
+        expr: paymaster_chain_healthy == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Chain {{ $labels.chain }} RPC is unhealthy"
+          description: "Health probes for chain {{ $labels.chain }} have failed for 5m. Sponsorship on that chain cannot be priced or validated."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymasterchainunhealthy"
+
+      - alert: PaymasterChainCircuitOpen
+        expr: paymaster_chain_circuit_open == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Chain {{ $labels.chain }} RPC circuit breaker is open"
+          description: "The breaker has been fast-failing reads for chain {{ $labels.chain }} for 2m, so every request on it is being refused without an RPC call."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymasterchaincircuitopen"
+
+      # A healthy RPC that serves a frozen head is worse than a dead one: probes pass, prices are
+      # stale, and nothing else notices. Chains with block times over ~2min need a longer window.
+      - alert: PaymasterChainHeadStalled
+        # delta(), not increase(): the block number is a gauge, and increase() would extrapolate it.
+        expr: delta(paymaster_chain_block_number[10m]) == 0 and paymaster_chain_healthy == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Chain {{ $labels.chain }} head has not advanced in 10m"
+          description: "The RPC for chain {{ $labels.chain }} answers but its block number is frozen — a lagging or forked node."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymasterchainheadstalled"
+
+  - name: paymaster-funding
+    rules:
+      # The backend also pages on this directly. Kept here as the backstop for the case where the
+      # backend's own alert path is what is broken — its webhook sink, or its egress.
+      - alert: PaymasterDepositBelowThreshold
+        expr: paymaster_funding_below_threshold{kind="deposit"} == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Paymaster deposit below threshold on chain {{ $labels.chain }}"
+          description: "EntryPoint deposit for chain {{ $labels.chain }} is under its configured minimum. Sponsorship fails outright when it reaches zero."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymasterdepositbelowthreshold"
+
+      - alert: PaymasterStakeBelowThreshold
+        expr: paymaster_funding_below_threshold{kind="stake"} == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Paymaster stake below threshold on chain {{ $labels.chain }}"
+          description: "Bundlers enforcing ERC-7562 will reject operations from an under-staked paymaster on chain {{ $labels.chain }}."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymasterstakebelowthreshold"
+
+      - alert: PaymasterFundingUnreadable
+        expr: paymaster_funding_below_threshold{kind="read_error"} == 1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Cannot read paymaster funding on chain {{ $labels.chain }}"
+          description: "The funding monitor has been unable to read deposit/stake for 10m — the balance is unknown, not known-good."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymasterfundingunreadable"
+
+      # Trend, not level: catches a burn rate that will empty the deposit before anyone tops it up,
+      # while the absolute balance still looks comfortable.
+      - alert: PaymasterDepositExhaustionPredicted
+        expr: predict_linear(paymaster_deposit_wei[1h], 4 * 3600) <= 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Deposit on chain {{ $labels.chain }} trends to zero within 4h"
+          description: "At the last hour's burn rate the EntryPoint deposit for chain {{ $labels.chain }} is exhausted inside 4 hours."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymasterdepositexhaustionpredicted"
+
+  - name: paymaster-errors
+    rules:
+      # A ratio, not a count: error rate is only meaningful against volume, and a fixed count either
+      # screams during a traffic spike or stays silent while a low-traffic deployment fails outright.
+      # `error` is an internal failure — signing, database, RPC — never a policy denial.
+      - alert: PaymasterHighErrorRate
+        expr: |
+          sum(rate(paymaster_sponsorships_total{outcome="error"}[5m]))
+            / sum(rate(paymaster_sponsorships_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Over 5% of sponsorship requests are erroring"
+          description: "{{ $value | humanizePercentage }} of sponsorship requests failed internally over the last 5m."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymasterhigherrorrate"
+
+      - alert: PaymasterPolicyEvaluationSlow
+        expr: |
+          histogram_quantile(0.99, sum by (le) (rate(paymaster_policy_evaluation_seconds_bucket[5m]))) > 0.25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Policy evaluation p99 above 250ms"
+          description: "p99 policy evaluation is {{ $value | humanizeDuration }} — usually a slow quota store or a rule making a chain call."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymasterpolicyevaluationslow"
+
+      # TUNE, or delete: only meaningful where continuous traffic is expected. Where it is, this is
+      # the one rule that catches "everything is green and nothing works" — the failure mode where
+      # requests never arrive because something upstream is broken.
+      - alert: PaymasterNoSponsorshipsIssued
+        expr: sum(rate(paymaster_sponsorships_total{outcome="issued"}[15m])) == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No sponsorship issued in 30m"
+          description: "The service is up and scraped but has issued nothing for 30m. Expected only if traffic is genuinely idle."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymasternosponsorshipsissued"
+
+  - name: paymaster-abuse
+    rules:
+      # The backend pages once per BLOCKED ip. This is the campaign view: many ips, none of them
+      # individually past the threshold, is invisible to the per-ip alert and obvious here.
+      - alert: PaymasterAuthFailureSpike
+        expr: sum(rate(paymaster_auth_failures_total[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sustained authentication failures"
+          description: "{{ $value | humanize }} auth failures/s over 10m — credential stuffing, or an integrator deployed a bad key."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymasterauthfailurespike"
+
+      - alert: PaymasterIpBlockSurge
+        expr: sum(increase(paymaster_ip_blocks_total[10m])) > 5
+        labels:
+          severity: critical
+        annotations:
+          summary: "Multiple IP blocks triggered in 10m"
+          description: "{{ $value | humanize }} block events in 10m. The counter is unlabelled by IP (an attacker picks their address, and an ip label would be unbounded cardinality) — the offending addresses are in the alert log."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymasteripblocksurge"
+
+      # TUNE against normal traffic. A denial surge on ONE rule is the useful shape: quota denials
+      # mean a caller is over budget; blocklist denials mean someone is probing what we refuse.
+      - alert: PaymasterDenialSurge
+        expr: sum by (rule) (rate(paymaster_policy_denials_total[5m])) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Policy rule {{ $labels.rule }} is denying heavily"
+          description: "{{ $labels.rule }} is denying {{ $value | humanize }} requests/s. Either a caller is exhausted, or someone is probing the policy."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymasterdenialsurge"
+
+      # TUNE: 1e14 wei/s is 0.0001 ETH per second, ~8.6 ETH/day. Set it to a rate you would not
+      # tolerate silently — this is the rule that stands between a policy misconfiguration and a
+      # drained deposit.
+      - alert: PaymasterGasCommitmentSurge
+        expr: sum(rate(paymaster_gas_committed_wei_total[10m])) > 1e14
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Gas commitment rate above budget"
+          description: "Committing {{ $value | humanize }} wei/s across all chains — well above the configured tolerance."
+          runbook_url: "https://github.com/TYDev01/Paymaster/blob/main/docs/MONITORING.md#paymastergascommitmentsurge"
