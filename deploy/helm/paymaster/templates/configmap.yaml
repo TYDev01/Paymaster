@@ -26,6 +26,23 @@ data:
 
   METRICS_ENABLED: {{ .Values.config.metricsEnabled | quote }}
 
+  {{- if .Values.config.tracing.enabled }}
+  OTEL_TRACES_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.config.tracing.endpoint | quote }}
+  OTEL_SERVICE_NAME: {{ .Values.config.tracing.serviceName | default (include "paymaster.fullname" .) | quote }}
+  OTEL_TRACES_SAMPLE_RATIO: {{ .Values.config.tracing.sampleRatio | quote }}
+  {{- end }}
+
+  {{- if .Values.config.alerting.webhookUrl }}
+  # Only set this here when the URL carries no credential. A Slack incoming-webhook URL IS the
+  # credential — leave this empty and pass ALERT_WEBHOOK_URL through extraEnv from a Secret instead.
+  ALERT_WEBHOOK_URL: {{ .Values.config.alerting.webhookUrl | quote }}
+  {{- end }}
+  {{- if .Values.config.alerting.format }}
+  ALERT_WEBHOOK_FORMAT: {{ .Values.config.alerting.format | quote }}
+  ALERT_WEBHOOK_MIN_SEVERITY: {{ .Values.config.alerting.minSeverity | quote }}
+  {{- end }}
+
   {{- if .Values.config.jwt.enabled }}
   ADMIN_JWT_TTL_SECONDS: {{ .Values.config.jwt.ttlSeconds | quote }}
   ADMIN_JWT_ISSUER: {{ .Values.config.jwt.issuer | quote }}

@@ -118,6 +118,12 @@ services:
       SPONSORSHIP_SIGNER_KEY: "${SPONSORSHIP_SIGNER_KEY:?set SPONSORSHIP_SIGNER_KEY in .env}"
       BOOTSTRAP_API_KEY: "${BOOTSTRAP_API_KEY:?set BOOTSTRAP_API_KEY in .env - generate one with npm run key:generate}"
       CHAINS: "${CHAINS:?set CHAINS in .env - see backend/.env.example}"
+      # Tracing is off unless asked for: with no collector running, an enabled exporter would just
+      # log a failed POST every few seconds. Bring up the monitoring profile first, then set
+      # OTEL_TRACES_ENABLED=true in .env.
+      OTEL_TRACES_ENABLED: "${OTEL_TRACES_ENABLED:-false}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}"
+      OTEL_SERVICE_NAME: paymaster
     ports:
       - "127.0.0.1:3000:3000"
     healthcheck:
@@ -126,6 +132,67 @@ services:
       timeout: 5s
       retries: 20
 
+  # --------------------------------------------------------------------------------------------
+  # Monitoring, behind a profile: `docker compose --profile monitoring up`.
+  #
+  # Profiled rather than default because the core stack is what a developer needs to sponsor an
+  # operation, and three more containers is a slower, heavier default for that. Everything here is
+  # configuration-only — the backend exports /metrics and OTLP spans whether or not these are up.
+  # --------------------------------------------------------------------------------------------
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    profiles: [monitoring]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Enough to see a trend over a weekend; this is a dev stack, not a metrics archive.
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/monitoring/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9090/-/healthy > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    profiles: [monitoring]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      # Dev only. Anonymous admin is exactly the thing the production Helm chart does not do.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: dark
+    volumes:
+      - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3002:3000"
+
+  # Terminates OTLP from the backend. A collector rather than a direct export to a tracing backend
+  # so swapping Tempo for Jaeger for a hosted vendor is a change to THIS file, not to the service.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.118.0
+    profiles: [monitoring]
+    command: ["--config=/etc/otel/collector.yaml"]
+    volumes:
+      - ./deploy/monitoring/otel:/etc/otel:ro
+    ports:
+      - "127.0.0.1:4318:4318" # OTLP/HTTP — what the backend posts to
+      - "127.0.0.1:4317:4317" # OTLP/gRPC — for anything else you point at it
+
 volumes:
   postgres-data:
   redis-data:
+  prometheus-data:
+  grafana-data:

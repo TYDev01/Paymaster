@@ -1,0 +1,454 @@
+{
+  "uid": "paymaster-overview",
+  "title": "Paymaster overview",
+  "description": "Sponsorship decisions, chain health, funding, and abuse. Panels are ordered the way an incident is triaged: is it serving, is the chain reachable, is there money, is someone attacking.",
+  "tags": ["paymaster", "erc-4337"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "chain",
+        "label": "Chain",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": "label_values(paymaster_chain_healthy, chain)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {"text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "id": 1,
+      "title": "Sponsorship",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Issued /s",
+      "description": "Sponsorships actually attested. Zero during expected traffic is the dead-man's-switch condition.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 4, "x": 0, "y": 1},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}]}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum(rate(paymaster_sponsorships_total{outcome=\"issued\"}[5m]))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Internal error ratio",
+      "description": "Errors over all sponsorship requests. Denials are excluded — a denial is the service working.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 4, "x": 4, "y": 1},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.01},
+              {"color": "red", "value": 0.05}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum(rate(paymaster_sponsorships_total{outcome=\"error\"}[5m])) / sum(rate(paymaster_sponsorships_total[5m]))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 4,
+      "title": "Sponsorship outcomes",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 1},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "stacking": {"mode": "normal"}}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (outcome) (rate(paymaster_sponsorships_total{chain=~\"$chain\"}[5m]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 5,
+      "title": "Policy evaluation latency",
+      "description": "p50/p95/p99 from the histogram. A rising p99 with a flat p50 usually means one rule is making a chain call.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 1},
+      "fieldConfig": {
+        "defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 0}},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(paymaster_policy_evaluation_seconds_bucket[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(paymaster_policy_evaluation_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(paymaster_policy_evaluation_seconds_bucket[5m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 6,
+      "title": "Denials by rule",
+      "description": "Which rule refused. This is the panel that answers an integrator asking why their operations stopped being sponsored.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 6},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"drawStyle": "bars", "lineWidth": 1, "fillOpacity": 60, "stacking": {"mode": "normal"}}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (rule) (rate(paymaster_policy_denials_total[5m]))",
+          "legendFormat": "{{rule}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 7,
+      "title": "Gas committed",
+      "description": "Worst-case gas committed at sponsorship time, in ETH/s. Actual spend is lower — the reconciler trues the counters up afterwards.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 6},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 6,
+          "custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "stacking": {"mode": "normal"}}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (chain) (rate(paymaster_gas_committed_wei_total{chain=~\"$chain\"}[10m])) / 1e18",
+          "legendFormat": "chain {{chain}} (ETH/s)"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 8,
+      "title": "Chain health",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 12},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 9,
+      "title": "Chain healthy",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 13},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}
+          ],
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "green", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "paymaster_chain_healthy{chain=~\"$chain\"}",
+          "legendFormat": "chain {{chain}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 10,
+      "title": "RPC circuit open",
+      "description": "1 while the breaker is fast-failing reads for a chain.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 13},
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {"0": {"text": "closed", "color": "green"}, "1": {"text": "OPEN", "color": "red"}}
+            }
+          ],
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "paymaster_chain_circuit_open{chain=~\"$chain\"}",
+          "legendFormat": "chain {{chain}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "Observed block height",
+      "description": "A flat line here with a healthy chain is a lagging or forked node.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 12, "x": 12, "y": 13},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "decimals": 0, "custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 0}},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "paymaster_chain_block_number{chain=~\"$chain\"}",
+          "legendFormat": "chain {{chain}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 12,
+      "title": "Funding",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 18},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 13,
+      "title": "EntryPoint deposit (ETH)",
+      "description": "What pays for sponsorship. When this reaches zero, every operation on the chain fails.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 19},
+      "fieldConfig": {
+        "defaults": {"unit": "none", "decimals": 4, "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "paymaster_deposit_wei{chain=~\"$chain\"} / 1e18",
+          "legendFormat": "chain {{chain}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 14,
+      "title": "EntryPoint stake (ETH)",
+      "description": "What lets a bundler accept our operations under the ERC-7562 reputation rules.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 19},
+      "fieldConfig": {
+        "defaults": {"unit": "none", "decimals": 4, "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "paymaster_stake_wei{chain=~\"$chain\"} / 1e18",
+          "legendFormat": "chain {{chain}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 15,
+      "title": "Funding below threshold",
+      "description": "kind=read_error means the balance is unknown, which is not the same as fine.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 19},
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {"0": {"text": "ok", "color": "green"}, "1": {"text": "BELOW", "color": "red"}}
+            }
+          ],
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "paymaster_funding_below_threshold{chain=~\"$chain\"}",
+          "legendFormat": "chain {{chain}} {{kind}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 16,
+      "title": "Abuse",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 25},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 17,
+      "title": "Authentication failures",
+      "description": "Unlabelled by IP on purpose: an attacker chooses their source address, so an ip label would be unbounded cardinality. Offending addresses are in the alert log.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 26},
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 10}},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum(rate(paymaster_auth_failures_total[5m]))",
+          "legendFormat": "auth failures"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 18,
+      "title": "Pre-auth rejections",
+      "description": "Requests refused before authentication ran: throttled (over the rate limit) or blocked (an IP past the abuse threshold).",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 26},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "stacking": {"mode": "normal"}}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (reason) (rate(paymaster_ip_rejections_total[5m]))",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 19,
+      "title": "IP blocks triggered",
+      "description": "Each increment is one IP crossing the auth-failure threshold. Several at once is a distributed attempt.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 26},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {"drawStyle": "bars", "lineWidth": 1, "fillOpacity": 60}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum(increase(paymaster_ip_blocks_total[10m]))",
+          "legendFormat": "blocks / 10m"
+        }
+      ]
+    }
+  ]
+}

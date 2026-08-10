@@ -1,0 +1,48 @@
+# Prometheus configuration for the paymaster stack.
+#
+# Scrapes the backend's /metrics and the bundler's, which together cover the whole sponsorship path:
+# the backend knows which policy allowed or denied and what it committed; rundler knows what happened
+# to the operation afterwards. Neither is sufficient alone.
+#
+# This is the DEVELOPMENT wiring (static targets against docker-compose service names). In
+# Kubernetes the Helm chart's ServiceMonitor replaces the backend job and Prometheus discovers pods
+# itself — the rules in alerts.yml are identical either way, which is why they live in their own file.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: local
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+# Alertmanager is intentionally NOT configured here. The backend already pages directly through
+# ALERT_WEBHOOK_URL for conditions it can detect itself (a drained deposit, a tripped circuit); these
+# rules cover what only a time series can see — rates, ratios and absence. Point them at your
+# Alertmanager by uncommenting below.
+#
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: paymaster-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend:3000"]
+        labels:
+          service: paymaster
+
+  # Rundler exports its own Prometheus metrics; scraping them here means one dashboard covers
+  # sponsorship and submission rather than two systems with different clocks.
+  - job_name: bundler
+    static_configs:
+      - targets: ["bundler:8081"]
+        labels:
+          service: rundler
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

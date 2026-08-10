@@ -21,6 +21,7 @@ import {InMemoryApiKeyStore} from "../src/auth/inMemoryApiKeyStore.js";
 import type {ApiKeyRecord} from "../src/auth/apiKeyStore.js";
 import type {Env} from "../src/config/env.js";
 import {deploy, loadArtifact, startAnvil, type AnvilInstance} from "./support/anvil.js";
+import {testEnv} from "./support/env.js";
 
 /**
  * The full vertical slice: an HTTP request in, a sponsorship out, and the sponsorship actually
@@ -50,37 +51,7 @@ describe("POST /paymaster/sponsor", () => {
   const accountOwnerKey = "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a" as Hex;
   const accountOwner = privateKeyToAccount(accountOwnerKey);
 
-  const env: Env = {
-    NODE_ENV: "test",
-    PORT: 0,
-    HOST: "127.0.0.1",
-    SPONSORSHIP_SIGNER_KEY: signerKey,
-    CHAINS: "[]",
-    SPONSORSHIP_VALIDITY_SECONDS: 300,
-    PAYMASTER_VERIFICATION_GAS_LIMIT: 300_000n,
-    POSTOP_GAS_LIMIT: 50_000n,
-    DEFAULT_POLICY_ID: "default",
-    DATABASE_MAX_CONNECTIONS: 10,
-    DATABASE_MIGRATE_ON_BOOT: true,
-    FUNDING_MONITOR_ENABLED: false,
-    FUNDING_MONITOR_INTERVAL_MS: 60_000,
-    FUNDING_MONITOR_REALERT_MS: 3_600_000,
-    RECONCILER_ENABLED: false,
-    RECONCILER_INTERVAL_MS: 60_000,
-    RECONCILER_CONFIRMATIONS: 5,
-    RECONCILER_MAX_BLOCK_RANGE: 2_000,
-    RECONCILER_INITIAL_LOOKBACK_BLOCKS: 5_000,
-    METRICS_ENABLED: false,
-    IP_THROTTLE_ENABLED: false,
-    IP_THROTTLE_REQUESTS_PER_WINDOW: 100,
-    IP_THROTTLE_WINDOW_SECONDS: 60,
-    IP_ABUSE_AUTH_FAILURE_THRESHOLD: 20,
-    IP_ABUSE_BLOCK_WINDOW_SECONDS: 900,
-    REQUEST_SIGNING_MAX_SKEW_SECONDS: 300,
-    ADMIN_JWT_TTL_SECONDS: 900,
-    ADMIN_JWT_ISSUER: "paymaster",
-    ADMIN_JWT_AUDIENCE: "paymaster-admin",
-  };
+  const env: Env = testEnv({SPONSORSHIP_SIGNER_KEY: signerKey});
 
   beforeAll(async () => {
     anvil = await startAnvil();

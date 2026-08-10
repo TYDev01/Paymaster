@@ -1,0 +1,19 @@
+# Grafana dashboard provisioning.
+#
+# Loads every dashboard JSON from the mounted directory. `allowUiUpdates: false` keeps the file the
+# source of truth: a dashboard edited in the browser and not committed is a dashboard that vanishes
+# on the next deploy, which is how monitoring quietly rots.
+
+apiVersion: 1
+
+providers:
+  - name: paymaster
+    orgId: 1
+    folder: Paymaster
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -110,22 +110,27 @@ something to point at mainnet without the hardening listed below.**
 | TypeScript SDK + example | ✅ full-stack e2e |
 | Deploy script + local devnet | ✅ runs end to end |
 | CI (contracts + backend + SDK) | ✅ |
+| KMS-backed signer (key never in process) | ✅ |
+| JWT admin auth, request signing, circuit breakers, IP throttling | ✅ |
+| Deposit/stake monitor + spend-cap reconciliation | ✅ |
+| Metrics, alert rules, Grafana, OTLP tracing, pager sink | ✅ see [docs/MONITORING.md](docs/MONITORING.md) |
+| Kubernetes / Helm chart | ✅ not lint-checked here (no `helm` binary) |
+
+Backend test coverage is **80.99% of statements** (89.07% branches) across 420 tests, measured with
+`npm run test:coverage` against the full suite — Postgres, Redis, anvil and rundler included.
 
 **Not yet done — required before production:**
 
-- **KMS-backed signer.** The signer key is currently held in process memory; the `SponsorshipSigner`
-  port is shaped for a KMS/HSM adapter, which does not exist yet.
-- **JWT admin auth**, request signing, circuit breakers, pre-auth IP throttling.
-- **Deposit manager** — the chain adapter can read funding, but nothing monitors it on a timer or
-  alerts on a low balance yet.
-- **Spend-cap reconciliation.** Spend caps charge the worst-case `maxCost`, not actual gas cost
-  (which is always lower). Closing this needs a loop reading `UserOperationEvent`.
-- **Monitoring** beyond rundler's built-in Prometheus metrics; **Kubernetes/Helm**.
-- **ESLint/Prettier** config; **test coverage has not been measured** (do not trust a coverage claim
-  that has not been produced).
 - **The Docker Compose stack has not been run end-to-end** in this environment (no Docker daemon);
-  its individual components all run outside Docker.
-- Most of the documentation set (runbooks, disaster recovery, Helm, operator/maintenance guides).
+  its individual components all run outside Docker, and `docker compose config` is clean.
+- **Alertmanager routing** is not configured, and two alert-rule thresholds ship as placeholders that
+  must be tuned to real traffic.
+- **`forge coverage`** for the contracts; no load, fuzz or forked-chain tests for the backend.
+- **Contract verification** (`forge verify-contract`) and a multi-chain deploy runner.
+- Most of the documentation set (runbooks, disaster recovery, operator/maintenance guides).
+
+Full detail, including what was deliberately *not* built and why, is in
+[docs/REMAINING.md](docs/REMAINING.md).
 
 ## License
 
