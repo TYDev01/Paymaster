@@ -360,6 +360,66 @@ contract VerifyingPaymasterTest is Test {
         paymaster.addSigner(address(1));
     }
 
+    /// Re-adding an authorised signer reverts rather than silently succeeding. `signerCount` is
+    /// what an operator checks before revoking the last one, so a duplicate add that inflated it
+    /// would make that check lie.
+    function test_addingAnExistingSignerReverts() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(VerifyingPaymaster.SignerAlreadyAuthorised.selector, signer));
+        paymaster.addSigner(signer);
+
+        assertEq(paymaster.signerCount(), 1, "signer count must not change");
+    }
+
+    /// Revoking a signer that was never authorised reverts. It matters because the alternative —
+    /// a silent no-op — would let an operator believe they had revoked a key when they had
+    /// mistyped the address, and the real signer would still be able to authorise spending.
+    function test_removingAnUnauthorisedSignerReverts() public {
+        address stranger = makeAddr("stranger");
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(VerifyingPaymaster.SignerNotAuthorised.selector, stranger));
+        paymaster.removeSigner(stranger);
+
+        assertEq(paymaster.signerCount(), 1, "signer count must not change");
+    }
+
+    function test_addingAZeroSignerReverts() public {
+        vm.prank(owner);
+        vm.expectRevert(VerifyingPaymaster.ZeroAddress.selector);
+        paymaster.addSigner(address(0));
+    }
+
+    /// A bare ETH send must land as an EntryPoint deposit, not sit in the contract's balance.
+    /// This is the refill path an automated top-up uses: it sends value and nothing else, and if
+    /// the ETH stopped at the paymaster's own balance it would pay for no sponsorship at all while
+    /// looking, from a block explorer, exactly like a successful refill.
+    function test_receiveForwardsPlainTransfersToTheDeposit() public {
+        uint256 before = paymaster.getDeposit();
+        address refiller = makeAddr("refiller");
+        vm.deal(refiller, 5 ether);
+
+        vm.prank(refiller);
+        (bool ok,) = address(paymaster).call{value: 3 ether}("");
+
+        assertTrue(ok, "plain transfer should be accepted");
+        assertEq(paymaster.getDeposit(), before + 3 ether, "transfer did not reach the deposit");
+        assertEq(address(paymaster).balance, 0, "ETH must not be left sitting on the paymaster");
+    }
+
+    /// Anyone may refill — a deposit is a gift to the paymaster, and gating it would break an
+    /// automated top-up running under a key that is deliberately not the owner.
+    function test_anyoneCanDeposit() public {
+        uint256 before = paymaster.getDeposit();
+        address stranger = makeAddr("stranger");
+        vm.deal(stranger, 1 ether);
+
+        vm.prank(stranger);
+        paymaster.deposit{value: 1 ether}();
+
+        assertEq(paymaster.getDeposit(), before + 1 ether, "deposit not credited");
+    }
+
     /// Ownership must be two-step: a transfer to a typo'd address must not take effect.
     function test_ownershipTransferIsTwoStep() public {
         address newOwner = makeAddr("newOwner");

@@ -23,7 +23,7 @@ export interface PackedUserOperation {
 }
 
 /** Largest value representable in the 128-bit halves of a packed pair. */
-const UINT128_MAX = (1n << 128n) - 1n;
+export const UINT128_MAX = (1n << 128n) - 1n;
 
 /** Largest value representable in a `uint48` timestamp field. */
 export const UINT48_MAX = (1n << 48n) - 1n;

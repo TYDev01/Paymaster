@@ -40,6 +40,25 @@ jobs:
       - name: Run Forge tests
         run: forge test -vvv
 
+      # The paymaster is 100% covered on lines, statements, branches and functions, so the floor is
+      # set at 100 and any new uncovered path fails the build. Scripts and tests are excluded — the
+      # deploy script is covered by its own suite, but a coverage percentage over a script is not a
+      # meaningful number.
+      - name: Check contract coverage
+        run: |
+          forge coverage --no-match-coverage "(test|script)" --report summary | tee coverage.txt
+          python3 - <<'PY'
+          import re, sys
+          row = next(l for l in open("coverage.txt") if "VerifyingPaymaster.sol" in l)
+          percentages = [float(p) for p in re.findall(r"(\d+\.\d+)%", row)]
+          if not percentages or min(percentages) < 100.0:
+              sys.exit(f"contract coverage regressed below 100%: {row.strip()}")
+          print("contract coverage: 100% across lines, statements, branches and functions")
+          PY
+
+      - name: Verify the deploy scripts parse
+        run: bash -n ../deploy/deploy-chains.sh && bash -n ../deploy/verify-contracts.sh
+
   backend:
     name: Backend
     runs-on: ubuntu-latest
@@ -87,6 +106,11 @@ jobs:
       - name: Format check
         run: npm run format:check
 
+      # FORK_TESTS is left on: the fork suite runs against a public RPC and is the only thing that
+      # checks our assumptions about the REAL EntryPoint rather than a local copy. If the public
+      # endpoint rate-limits, the suite reports the failure rather than skipping — a skipped test
+      # proves nothing, and silently skipping this one would hide a genuine incompatibility.
+      # Set FORK_RPC_URL to a dedicated endpoint if the public one proves unreliable.
       - name: Test
         run: npm run test --workspaces --if-present
 

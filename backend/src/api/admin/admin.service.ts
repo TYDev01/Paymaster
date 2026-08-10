@@ -8,6 +8,7 @@ import type {Role} from "../../auth/permissions.js";
 import type {AuditLogRepository} from "../../db/auditLogRepository.js";
 import type {PolicyDefinition, PostgresPolicyRepository, StoredPolicy} from "../../db/postgresPolicyRepository.js";
 import type {SponsorshipRepository, StoredSponsorship} from "../../db/sponsorshipRepository.js";
+import type {PolicyBroadcast} from "../../policy/policyBroadcast.js";
 import type {PolicySource} from "../../policy/policySource.js";
 import type {ApiKeyView, CreateKeyRequest, CreatedApiKeyView, UpsertPolicyRequest} from "./admin.dto.js";
 
@@ -31,6 +32,11 @@ export interface AdminDeps {
   readonly apiKeys: ApiKeyStore;
   readonly sponsorships: SponsorshipRepository | undefined;
   readonly audit: AuditLogRepository | undefined;
+  /**
+   * Tells the OTHER replicas that policy changed. Optional: absent means single-replica, where
+   * reloading locally is the whole job.
+   */
+  readonly broadcast?: PolicyBroadcast | undefined;
 }
 
 export interface ActorContext {
@@ -79,7 +85,7 @@ export class AdminService {
 
     // Throws InvalidRuleConfigError before writing anything if a rule cannot be built.
     await this.#policies().upsert(definition);
-    await this.deps.policySource.reload();
+    await this.#reloadEverywhere();
 
     await this.#audit(context, "policy.upsert", `policy:${request.id}`, {
       enabled: request.enabled,
@@ -102,15 +108,30 @@ export class AdminService {
     }
 
     if (deleted) {
-      await this.deps.policySource.reload();
+      await this.#reloadEverywhere();
       await this.#audit(context, "policy.delete", `policy:${id}`, {});
     }
     return deleted;
   }
 
+  /**
+   * Applies a policy change here, then tells every other replica to apply it too.
+   *
+   * Local first, and awaited, so the response only claims success once the change is actually
+   * serving on the replica that answered. The broadcast is best-effort and cannot fail the request:
+   * peers that miss it converge on their reload timer, so the worst case is latency, not
+   * divergence. Without this the change would reach ONLY this replica, which behind a load balancer
+   * means an operator's blocklist addition silently applies to a fraction of traffic.
+   */
+  async #reloadEverywhere(): Promise<void> {
+    await this.deps.policySource.reload();
+    await this.deps.broadcast?.publish();
+  }
+
   /** td.md's hot reload, on demand. Also runs on a timer; this is the "now" button. */
   async reloadPolicies(context: ActorContext): Promise<{count: number; generation: number}> {
     const result = await this.deps.policySource.reload();
+    await this.deps.broadcast?.publish();
     await this.#audit(context, "policy.reload", undefined, {count: result.count, generation: result.generation});
     return {count: result.count, generation: result.generation};
   }
@@ -171,9 +192,10 @@ export class AdminService {
   /**
    * Attestations issued.
    *
-   * Reading these as spend overstates cost: they are commitments, and most never land. The route
-   * documents that; there is no way to express it in the data itself short of a reconciliation
-   * loop against UserOperationEvent, which does not exist yet.
+   * Reading these as spend overstates cost: they are commitments, and most cost less than the
+   * worst case they reserved. `SpendReconciler` trues the quota COUNTERS up to actual on-chain
+   * cost from `UserOperationEvent`, but these rows keep the amount committed at signing time —
+   * which is what an attestation actually promised, and so what an audit of it should show.
    */
   async listSponsorships(query: {
     apiKeyId?: string;

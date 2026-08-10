@@ -113,6 +113,31 @@ export const envSchema = z
     /** How far back to start when a chain has no checkpoint yet. */
     RECONCILER_INITIAL_LOOKBACK_BLOCKS: z.coerce.number().int().min(0).max(10_000_000).default(5_000),
 
+    /**
+     * Policy convergence across replicas.
+     *
+     * `PolicySource` holds the policy set in memory; an admin write reloads only the replica that
+     * served it. Every replica therefore also reloads on this interval — the timer is the
+     * correctness guarantee and bounds staleness unconditionally. With Redis, a pub/sub message on
+     * the channel below makes a change land in milliseconds instead; that is an optimisation on
+     * top, never the mechanism itself, because pub/sub has no delivery guarantee.
+     */
+    POLICY_RELOAD_INTERVAL_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(30_000),
+    POLICY_BROADCAST_CHANNEL: z.string().min(1).default("paymaster:policy:changed"),
+
+    /**
+     * Leader election, for work that must happen once across the fleet rather than once per replica.
+     *
+     * Currently that is pager delivery: three replicas seeing one drained deposit would otherwise
+     * raise three alerts. Monitoring itself is never gated — a chain unreachable from one pod is a
+     * real condition — and neither is the log sink. Requires Redis; without it there is one replica,
+     * which always leads.
+     */
+    LEADER_ELECTION_ENABLED: boolFromEnv(true),
+    LEADER_LOCK_KEY: z.string().min(1).default("paymaster:leader"),
+    /** Lease lifetime. Renewed at a third of this, so two failed renewals still leave headroom. */
+    LEADER_LOCK_TTL_MS: z.coerce.number().int().min(3_000).max(300_000).default(30_000),
+
     /** Expose Prometheus metrics at /metrics. On by default; the endpoint carries no secrets. */
     METRICS_ENABLED: boolFromEnv(true),
 

@@ -41,12 +41,12 @@ tests have each been shown to fail when the code they guard is broken. See
 
 | Path | What |
 | --- | --- |
-| [contracts/](contracts/) | Foundry project: `VerifyingPaymaster.sol`, deploy script, 22 tests |
+| [contracts/](contracts/) | Foundry project: `VerifyingPaymaster.sol`, deploy script, 35 tests |
 | [backend/](backend/) | NestJS sponsorship + admin API, policy/signature engines, DB, Redis |
 | [sdk/](sdk/) | Framework-agnostic TypeScript SDK + runnable example |
-| [deploy/](deploy/) | `local-setup.sh` (one-command devnet), rundler chain spec |
+| [deploy/](deploy/) | Devnet setup, multi-chain deploy + verification, Helm chart, monitoring config, k6 load test |
 | [docker-compose.yml](docker-compose.yml) | Dev stack: postgres, redis, anvil, bundler, backend |
-| [docs/](docs/) | Architecture, security, threat model |
+| [docs/](docs/) | Architecture, security, deployment, operations, runbooks, DR, monitoring, development |
 
 ## Quickstart (local)
 
@@ -75,10 +75,12 @@ see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#deployment).
 ## Testing
 
 ```bash
-# Contracts (Foundry): 22 tests, incl. a full EntryPoint + SimpleAccount flow
+# Contracts (Foundry): 35 tests, incl. a full EntryPoint + SimpleAccount flow and the deploy script.
+# 100% line/statement/branch/function coverage, enforced in CI.
 cd contracts && forge test
 
-# Backend + SDK: 331 tests, incl. real Postgres, Redis, EntryPoint, and a real bundler.
+# Backend + SDK: 469 tests, incl. real Postgres, Redis, EntryPoint, a real bundler, 200-way
+# concurrency against real Redis, 2,000-case property tests, and a fork of Ethereum mainnet.
 # Integration suites self-skip when their infra (rundler binary, postgres, redis) is absent.
 npm test
 ```
@@ -98,7 +100,7 @@ something to point at mainnet without the hardening listed below.**
 
 | Area | State |
 | --- | --- |
-| VerifyingPaymaster contract | ✅ 22 tests, mutation-checked |
+| VerifyingPaymaster contract | ✅ 35 tests, mutation-checked, 100% covered |
 | Signature engine | ✅ differential vs deployed EntryPoint |
 | Policy engine (allow/block/quota/spend caps, hot reload) | ✅ |
 | Chain adapter + config-only onboarding | ✅ |
@@ -115,22 +117,44 @@ something to point at mainnet without the hardening listed below.**
 | Deposit/stake monitor + spend-cap reconciliation | ✅ |
 | Metrics, alert rules, Grafana, OTLP tracing, pager sink | ✅ see [docs/MONITORING.md](docs/MONITORING.md) |
 | Kubernetes / Helm chart | ✅ not lint-checked here (no `helm` binary) |
+| Multi-chain deploy + explorer verification | ✅ exercised against a live node |
+| Cross-replica policy propagation + leader lock | ✅ vs real Redis |
+| Load, property-based and forked-chain tests | ✅ incl. mainnet fork vs the real EntryPoint |
+| Documentation set | ✅ see [docs/](docs/) |
 
-Backend test coverage is **80.99% of statements** (89.07% branches) across 420 tests, measured with
-`npm run test:coverage` against the full suite — Postgres, Redis, anvil and rundler included.
+Coverage is measured against the full suite — Postgres, Redis, anvil, rundler and a mainnet fork
+included — not estimated:
+
+| | Lines | Statements | Branches | Functions |
+| --- | --- | --- | --- | --- |
+| Contracts | 100% | 100% | 100% | 100% |
+| Backend | 80.99% | 80.99% | 89.07% | 83.03% |
 
 **Not yet done — required before production:**
 
 - **The Docker Compose stack has not been run end-to-end** in this environment (no Docker daemon);
-  its individual components all run outside Docker, and `docker compose config` is clean.
+  its individual components all run outside Docker, and `docker compose config` is clean. This is
+  the one remaining item that blocks production.
 - **Alertmanager routing** is not configured, and two alert-rule thresholds ship as placeholders that
   must be tuned to real traffic.
-- **`forge coverage`** for the contracts; no load, fuzz or forked-chain tests for the backend.
-- **Contract verification** (`forge verify-contract`) and a multi-chain deploy runner.
-- Most of the documentation set (runbooks, disaster recovery, operator/maintenance guides).
+- The Helm chart has not been run through `helm lint` / `helm template` here.
 
 Full detail, including what was deliberately *not* built and why, is in
 [docs/REMAINING.md](docs/REMAINING.md).
+
+## Documentation
+
+| | |
+| --- | --- |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Structure, and the reasoning behind it |
+| [SECURITY.md](docs/SECURITY.md) | Security guide and threat model |
+| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Production deployment, in order, with a checklist |
+| [OPERATIONS.md](docs/OPERATIONS.md) | Policies, keys, chains, funding, maintenance, upgrades |
+| [RUNBOOKS.md](docs/RUNBOOKS.md) | Incident procedures |
+| [DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md) | What survives what, and what does not |
+| [MONITORING.md](docs/MONITORING.md) | Metrics, alerts, tracing, paging |
+| [DEVELOPMENT.md](docs/DEVELOPMENT.md) | Working on the codebase |
+| [openapi.yaml](backend/openapi.yaml) | API reference |
 
 ## License
 

@@ -9,6 +9,21 @@ Legend: 🔴 blocks production · 🟡 spec-required, not blocking · 🟢 harde
 
 ---
 
+## Completed: deploy, Redis, testing and documentation pass
+
+- ✅ **Multi-chain deploy runner + contract verification** — and, in running it against a real
+  chain, a genuine bug in the existing deploy script: staking as the deployer after handing
+  ownership to a multisig reverted, leaving a funded but unstaked paymaster. Details below.
+- ✅ **Contract coverage to 100%**, with a CI floor that fails the build on any regression.
+- ✅ **The two Redis uses that were needed** — cross-replica policy propagation (a real multi-replica
+  bug) and a leader lock that stops N replicas paging N times. The other two td.md lists are
+  documented as deliberately not built.
+- ✅ **Load, property-based and forked-chain tests** — including a sponsored operation executed by
+  the real EntryPoint on a fork of mainnet, and a demonstration that a quota of 50 grants exactly 50
+  under 200-way concurrency.
+- ✅ **The full documentation set** — deployment, operations, runbooks, disaster recovery, developer
+  guide.
+
 ## Completed: monitoring pass
 
 - ✅ **Full monitoring stack** — Prometheus alert rules, a provisioned Grafana dashboard, OTLP
@@ -36,8 +51,9 @@ Legend: 🔴 blocks production · 🟡 spec-required, not blocking · 🟢 harde
 - ✅ **ESLint + Prettier + coverage tooling** — flat-config ESLint, Prettier, `vitest --coverage`,
   wired into CI. Coverage numbers are deliberately not cited until the full suite is run.
 
-The four items above that block production are struck through below; the rest of each section is the
-work that remains.
+**One item now blocks production: the Docker Compose stack has never been booted, because there is
+no Docker daemon in this environment.** Everything else on td.md's and td2.md's lists is either done
+or listed under "Deliberately NOT built" with its reasoning.
 
 ---
 
@@ -129,20 +145,45 @@ Still open: **Alertmanager routing** is not configured (routing/silencing/escala
 decisions, and the compose stack deliberately does not page), and the `PaymasterGasCommitmentSurge`
 and `PaymasterDenialSurge` thresholds ship as placeholders that must be tuned to real traffic.
 
-### 🟡 Remaining Redis uses
-Redis currently backs quotas only. td.md also lists: nonce cache, policy cache, temporary-signature
-store, distributed lock management. None are built (and some may not be needed — see "Deliberately
-not built").
+### ✅ Remaining Redis uses — DONE (the two that were needed)
+td.md lists four Redis uses beyond quotas. Two were real gaps and are built; two would have been
+cargo cult and are in "Deliberately NOT built" below with their reasoning.
 
-### 🟡 Documentation set
-[docs/ARCHITECTURE.md](ARCHITECTURE.md), [docs/SECURITY.md](SECURITY.md) (security guide + threat
-model), and [backend/openapi.yaml](../backend/openapi.yaml) exist. Still to write, from td.md's list:
-- Deployment guide (production, beyond the local quickstart)
-- Runbooks
-- Disaster recovery
-- Maintenance guide
-- Operator guide
-- Developer guide (beyond the README)
+- **Policy propagation ("policy cache")** — this was a genuine multi-replica BUG, not an
+  optimisation. `PolicySource` holds the policy set in memory and an admin write reloaded only the
+  replica that served it, so behind a load balancer an operator who added a sender to a blocklist had
+  blocked them on a fraction of traffic, with no way to tell which fraction. Now every replica
+  reloads on a timer (`POLICY_RELOAD_INTERVAL_MS`, the correctness guarantee, which holds without
+  Redis) and a Redis pub/sub announcement makes a change land in milliseconds (the optimisation).
+  `policyBroadcast.ts`, `policyReloader.ts`; bursts are coalesced and overlapping reloads serialise
+  so the newest state wins. Tested in `test/policyPropagation.test.ts` and against a real Redis in
+  `test/redis.test.ts`.
+- **Distributed lock management** — `RedisLeaderLock` (`monitoring/leaderLock.ts`), a lease with
+  atomic renew/release Lua scripts. It gates PAGER DELIVERY only: three replicas seeing one drained
+  deposit previously raised three alerts, and a resolve from one could close an incident the others
+  still held open. Monitoring itself is never gated (a chain unreachable from one pod is a real
+  condition) and neither is the log sink. The reconciler is deliberately not gated either — it
+  already claims rows atomically, so a lock would make it single-threaded for no gain. Tested
+  against a real Redis, including lease expiry and takeover.
+
+### ✅ Documentation set — DONE
+Every document on td.md's list now exists:
+
+| Document | Covers |
+| --- | --- |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Structure and the reasoning behind it |
+| [SECURITY.md](SECURITY.md) | Security guide and threat model |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Production deployment, in dependency order, with a checklist |
+| [OPERATIONS.md](OPERATIONS.md) | Operator guide: policies, keys, chains, funding, maintenance schedule, upgrades |
+| [RUNBOOKS.md](RUNBOOKS.md) | Incident procedures — the stop button, spend runaway, leaked keys, dependency outages |
+| [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md) | What survives what, RTO/RPO, and what is genuinely unrecoverable |
+| [MONITORING.md](MONITORING.md) | Metric catalogue, a runbook entry per alert, tracing, pager config |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | Developer guide: layout, conventions, the test layering, how to add a rule/chain/metric/migration |
+| [backend/openapi.yaml](../backend/openapi.yaml) | API reference |
+
+The maintenance guide is a section of OPERATIONS.md rather than its own file — weekly/monthly/
+quarterly tasks and the upgrade procedure read as part of operating the thing, not as a separate
+discipline.
 
 ---
 
@@ -154,18 +195,24 @@ Flat-config ESLint (`eslint.config.js`, typescript-eslint recommended + prettier
 `format` / `format:check` scripts and CI steps in `.github/workflows/test.yml`. The whole tree passes
 both.
 
-### 🟡 Measure test coverage — MEASURED (backend), contracts pending
-The full backend suite now runs in this environment — 420 tests across 24 files, including the
-Postgres, Redis, anvil and rundler-backed ones — so a real figure can be cited:
+### ✅ Measure test coverage — DONE, both workspaces
+The full suite runs in this environment — 449 backend tests across 28 files (Postgres, Redis, anvil,
+rundler and a mainnet fork included) and 35 contract tests — so these are measured, not estimated:
 
-| | Statements | Branches | Functions | Lines |
+| | Lines | Statements | Branches | Functions |
 | --- | --- | --- | --- | --- |
-| Backend (`src/`) | 80.99% | 89.07% | 83.03% | 80.99% |
+| Contracts (`VerifyingPaymaster.sol`) | 100% | 100% | 100% | 100% |
+| Backend (`src/`) | 80.99% | 80.99% | 89.07% | 83.03% |
 
-Measured with `npm run test:coverage` (`vitest run --coverage`, `@vitest/coverage-v8`). The gaps are
-where you would expect them and are honest ones: `awsKmsClient.ts` (16% — needs real KMS),
-`securityPlugin.ts` (0% — Fastify hook wiring, exercised only through a booted server),
-`chainEventSource.ts` (36%). `forge coverage` for the contracts is still to add.
+`forge coverage` is now wired into CI with a **100% floor** on the contract, so any new uncovered
+path fails the build. Reaching it found two genuinely untested behaviours worth having: `receive()`
+forwarding a bare ETH transfer into the EntryPoint deposit (the automated-refill path — ETH stopping
+at the contract's own balance would look like a successful top-up and pay for nothing), and
+`removeSigner` rejecting an address that was never authorised (a silent no-op would let an operator
+believe they had revoked a key they had actually mistyped).
+
+The backend gaps are honest ones: `awsKmsClient.ts` (16% — needs real KMS), `securityPlugin.ts`
+(0% — Fastify hook wiring, exercised only through a booted server), `chainEventSource.ts` (36%).
 
 ### ✅ Additional security controls (td.md list) — DONE
 All four, under `backend/src/security/` (tested in `test/{circuitBreaker,ipThrottle,requestSignature}.test.ts`):
@@ -182,13 +229,49 @@ All four, under `backend/src/security/` (tested in `test/{circuitBreaker,ipThrot
   in the shared quota store and blocks an IP past a threshold for the rest of the window, alerting
   once on the transition. Distinct from quotas: it shares the store, not the counters.
 
-### 🟢 Load / fuzz / forked-chain tests
-td.md lists load testing, property-based tests, fuzz testing, forked-chain tests. Contracts have
-Foundry fuzz tests; the backend has none of load/fork. No k6/artillery load suite.
+### ✅ Load / fuzz / forked-chain tests — DONE
+All four of td.md's categories, and each targets a property the existing suite could not reach.
 
-### 🟢 Contract deployment verification
-The deploy script does not yet run `forge verify-contract` against block explorers, and there is no
-multi-chain deploy runner (deploy to all six target chains from one command).
+- **Forked chain** (`test/fork.test.ts`) — forks Ethereum mainnet at head and runs a sponsored
+  operation through the REAL EntryPoint at its canonical address, at a real base fee. It confirms
+  the assumption everything else takes on faith: that `0x0000...032` really is EntryPoint v0.7 and
+  behaves as the vendored copy does, that our deposit and stake register on the real ledger, and
+  that the paymaster's deposit pays while the account's balance does not move. Runs against a public
+  RPC by default, so it is not silently skipped.
+- **Load / concurrency** (`test/load.test.ts`) — 200 concurrent sponsorship requests against a quota
+  of 50, backed by a real Redis. Exactly 50 are granted and 150 cleanly refused with 429, zero 5xx.
+  That is the check-then-increment over-grant bug `RedisQuotaStore`'s Lua script exists to prevent,
+  demonstrated under real contention rather than argued from the code. Throughput is printed as an
+  observation, deliberately not asserted — an RPS threshold on a CI runner is either meaningless or
+  flaky.
+- **Property-based / fuzz** (`test/property.test.ts`) — 2,000 generated cases per property over the
+  code where one wrong bit is a wrong amount of money: uint128 packing round-trips and refuses
+  overflow rather than truncating, the paymasterAndData codec round-trips every field and rejects
+  every truncated prefix, worst-case cost is monotonic in gas (a non-monotonic cost would let a
+  caller split spending to stay under a cap while spending more), and quota windows tile time with
+  no gaps or overlaps. A fixed seed, so failures replay; the failing case is printed.
+- **Real load testing** (`deploy/load/k6-sponsor.js`) — a k6 ramp for a DEPLOYED instance, where TLS,
+  connection limits and the database under sustained write are what actually break. Not run here: it
+  spends real money by design, and the header says so.
+
+### ✅ Contract deployment verification + multi-chain runner — DONE
+`deploy/deploy-chains.sh` deploys, funds, stakes and source-verifies on every configured chain from
+one command, then prints the backend's `CHAINS` configuration generated from the broadcast receipts
+— so the config cannot disagree with what is actually on chain. It preflights every chain before
+broadcasting to any (a missing RPC URL on the sixth chain must not leave you half-deployed across
+five), is idempotent, and fails soft per chain. `deploy/verify-contracts.sh` re-runs verification
+alone, because an explorer being down is not a reason to re-run a deploy that already spent gas.
+
+**Running it against a real chain found a real bug in the existing deploy script.** `addStake` is
+`onlyOwner`, and the script constructed the paymaster owned by `PAYMASTER_OWNER` before staking it
+as the deployer — so every deploy where the owner is a multisig, which is the documented production
+recommendation, reverted `OwnableUnauthorizedAccount` AFTER deploying the contract and making the
+deposit, leaving a funded but UNSTAKED paymaster that every conforming bundler rejects. It was
+invisible until now because every existing path sets the owner to the deployer. Fixed by deploying
+owned by the deployer, funding and staking, then handing over via `Ownable2Step` — which also means
+a mistyped owner leaves control with the deployer instead of burning the contract. Regression-tested
+in `contracts/test/DeployPaymaster.t.sol`, and the deploy config is now a struct rather than raw env
+reads so the tests do not fight over the shared process environment.
 
 ---
 
@@ -207,6 +290,16 @@ and reversible, not silently skipped.
   consistency story for no gain.
 - **`admins`, `chains` tables** — legitimately missing. `admins` awaits JWT auth; `chains` are still
   env config (which is why "enable/disable chain" is not yet in the admin API). Build when needed.
+- **Redis nonce cache** — td.md lists one; there is nothing for it to cache. The EntryPoint owns
+  nonces and is authoritative, and the paymaster never needs to know one before signing: an
+  attestation binds to the operation's nonce through the EIP-712 digest, so a stale cached nonce
+  could only produce an attestation that fails on chain. A cache here would add a way to be wrong
+  about something we do not need to be right about.
+- **Temporary signature store** — attestations are stateless by construction. The paymaster recovers
+  the signer from `paymasterAndData` during validation; nothing on either side needs to look one up
+  afterwards. Storing them would create a second, expiring copy of something the caller already holds
+  and the chain will verify independently — and a store of live sponsorship signatures is a target
+  with no compensating benefit.
 - **Dynamic policy-plugin loading** — td.md says "custom policy plugins". The `PolicyRule` interface
   *is* the extension point, but a new rule must be compiled in. Runtime plugin loading (untrusted
   code deciding whether to spend money) is a security liability that outweighs the flexibility.
