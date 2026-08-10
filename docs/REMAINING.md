@@ -51,9 +51,11 @@ Legend: 🔴 blocks production · 🟡 spec-required, not blocking · 🟢 harde
 - ✅ **ESLint + Prettier + coverage tooling** — flat-config ESLint, Prettier, `vitest --coverage`,
   wired into CI. Coverage numbers are deliberately not cited until the full suite is run.
 
-**One item now blocks production: the Docker Compose stack has never been booted, because there is
-no Docker daemon in this environment.** Everything else on td.md's and td2.md's lists is either done
-or listed under "Deliberately NOT built" with its reasoning.
+**Nothing on td.md's or td2.md's lists is now outstanding.** Every item is either done — including
+the Docker Compose stack, booted and verified end to end — or listed under "Deliberately NOT built"
+with its reasoning. What remains are deployment-specific decisions (Alertmanager routing, tuning two
+alert thresholds to real traffic) and `helm lint`, which needs a `helm` binary this environment does
+not have.
 
 ---
 
@@ -66,11 +68,48 @@ The signing key no longer has to live in process heap: setting `SPONSORSHIP_SIGN
   (AWS adapter, dynamic-imported optional dep), wired in `app.module.ts`; env enforces exactly one of
   the local key or the KMS key. Tested in `test/kmsSigner.test.ts`.
 
-### 🔴 Docker Compose stack verified end-to-end
-`docker-compose.yml` parses (`docker compose config` is clean) and every component runs outside
-Docker, but the composed stack has **never been booted** — no Docker daemon in the build environment.
-- **Done when:** `docker compose up` brings up postgres+redis+anvil+bundler+backend and the SDK
-  example sponsors an op against it. Needs the images to build and the healthchecks to pass.
+### ✅ Docker Compose stack verified end-to-end — DONE
+`docker compose up` now brings up postgres + redis + anvil + bundler + backend, all five healthy,
+and the SDK example sponsors a real operation through it: mined, `success: true`, paid from the
+paymaster's deposit, account balance unchanged. The `--profile monitoring` stack was booted too —
+Prometheus scraping all three targets with all 15 alert rules loaded, Grafana with its datasource
+and dashboard provisioned, and the OTel collector receiving spans.
+
+**Booting it found five defects, none of which any other test could have caught.** They are listed
+because they are the argument for why "it parses" is not "it runs":
+
+1. **The image could not build.** `COPY --from=deps /app/backend/node_modules` referenced a path npm
+   never creates — it hoists workspace dependencies to the root — so the build failed outright.
+2. **The image could not start.** The runtime `CMD` was `npx tsx backend/src/main.ts`, but `tsx` is
+   a devDependency and the image is built `--omit=dev`. Fixed properly rather than by shipping tsx:
+   there is now a real `tsc` emit step (`tsconfig.build.json`) and the runtime runs `node
+   backend/dist/main.js`, which is what the Dockerfile's own "no compiler, no dev dependencies"
+   comment always claimed.
+3. **The bundler could never become healthy.** Its healthcheck used `wget`, which the rundler image
+   does not ship (nor `curl`). The container sat in `health: starting` forever, and anything waiting
+   on `condition: service_healthy` for it would have hung indefinitely rather than failed. Replaced
+   with a real JSON-RPC round trip over bash's `/dev/tcp`.
+4. **The bundler and backend disagreed about the EntryPoint.** `deploy/rundler/chain.toml` pins the
+   canonical v0.7 address; `local-setup.sh` deployed the EntryPoint wherever `forge create` landed.
+   That is precisely the silent mismatch chain.toml's own comment warns about — the backend signs
+   attestations bound to one EntryPoint while the bundler submits to another, and every sponsorship
+   fails with an opaque AA34. Fixed by placing the local EntryPoint at the canonical address
+   (`anvil_setCode`), which also makes the devnet match every real chain.
+5. **A fresh database had no policies at all.** With `DATABASE_URL` set, policies come from the
+   database and the in-code bootstrap set is never consulted — so the documented quickstart failed
+   with "no policy with id default", naming a policy nobody had been told to create. Added
+   `BOOTSTRAP_DEFAULT_POLICY` (off by default; seeds only into an EMPTY policy table, so it can
+   never overwrite or resurrect an operator's policy), mirroring how `BOOTSTRAP_API_KEY` already
+   solves the same chicken-and-egg for credentials.
+
+Also fixed on the way: host port bindings are now overridable (a developer machine very often
+already runs Postgres on 5432), and a comment inside an unquoted heredoc in `local-setup.sh` used
+backticks — so bash executed `source` with no argument on every run.
+
+Note the ordering the stack requires, which is now documented in the README: the backend validates
+`CHAINS` at startup and refuses to serve a chain whose EntryPoint has no code, so contracts must
+exist before it boots. `docker compose up -d anvil` → `./deploy/local-setup.sh` → put the generated
+`CHAINS` in `.env` (with `http://anvil:8545` for the container network) → `docker compose up`.
 
 ### ✅ Deposit / stake monitor + low-balance alerting — DONE
 `FundingMonitor` (`backend/src/monitoring/fundingMonitor.ts`) polls every chain's funding on a timer,

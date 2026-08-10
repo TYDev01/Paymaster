@@ -17,6 +17,12 @@ COPY backend/package.json ./backend/
 # silently picks up a new transitive dependency is a build that ships code nobody reviewed.
 RUN npm ci --omit=dev --workspace @paymaster/backend --include-workspace-root
 
+# npm hoists workspace dependencies to the root node_modules, so backend/node_modules exists only
+# when a version conflict forces a nested copy — which it currently does not. Creating it
+# unconditionally keeps the COPY in the runtime stage valid either way; without this the build
+# fails outright the moment nothing needs nesting.
+RUN mkdir -p /app/backend/node_modules
+
 # ---------------------------------------------------------------------------------------------
 # build: typecheck against the full dependency set
 # ---------------------------------------------------------------------------------------------
@@ -29,9 +35,17 @@ RUN npm ci --workspace @paymaster/backend --include-workspace-root
 
 COPY backend/ ./backend/
 
-# Typecheck in the image, not just in CI. It costs seconds and it means an image can never be
-# built from code that does not compile.
-RUN npm run typecheck --workspace @paymaster/backend
+# Emit real JavaScript, which also typechecks everything the image will ship — so an image can
+# never be built from source that does not compile.
+#
+# The service runs through `tsx` in development, but tsx is a dev dependency that carries esbuild;
+# shipping it would put a compiler in the production image, which is exactly what these stages exist
+# to avoid. The runtime stage below therefore runs plain `node`.
+#
+# This checks src only. The full `npm run typecheck` additionally covers the test suite, which
+# imports the sdk workspace that this stage deliberately does not copy — that check belongs to CI,
+# where the whole monorepo is present, not to a release build of one service.
+RUN npm run build --workspace @paymaster/backend
 
 # ---------------------------------------------------------------------------------------------
 # runtime
@@ -49,7 +63,9 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/backend/node_modules ./backend/node_modules
 COPY package.json ./
 COPY backend/package.json ./backend/
-COPY backend/src ./backend/src
+COPY --from=build /app/backend/dist ./backend/dist
+# Read at runtime by the migration runner, which resolves them relative to its own module URL.
+# dist/db and src/db sit at the same depth, so that path is unchanged by compiling.
 COPY backend/migrations ./backend/migrations
 
 # Run unprivileged. The node image ships a `node` user; use it rather than inventing another.
@@ -64,4 +80,4 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:3000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["npx", "tsx", "backend/src/main.ts"]
+CMD ["node", "backend/dist/main.js"]

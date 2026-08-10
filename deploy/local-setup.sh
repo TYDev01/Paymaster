@@ -33,6 +33,9 @@ SPONSOR_SIGNER_KEY="0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092
 SPONSOR_SIGNER_ADDR="0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
 
 MULTICALL3="0xcA11bde05977b3631167028862bE2a173976CA11"
+# The v0.7 EntryPoint address on every real chain. The local chain is pinned to it too — see the
+# EntryPoint section below for why that matters to the bundler.
+CANONICAL_ENTRYPOINT_V07="0x0000000071727De22E5E9d8BAf0edAc6f37da032"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
@@ -73,8 +76,32 @@ cd "${ROOT}/contracts"
 forge build >/dev/null 2>&1
 
 log "deploying EntryPoint"
-ENTRY_POINT="$(forge create --rpc-url "${RPC_URL}" --private-key "${DEPLOYER_KEY}" --broadcast --json \
+DEPLOYED_ENTRY_POINT="$(forge create --rpc-url "${RPC_URL}" --private-key "${DEPLOYER_KEY}" --broadcast --json \
   lib/account-abstraction/contracts/core/EntryPoint.sol:EntryPoint | json_deployed)"
+
+# Mirror it to the CANONICAL v0.7 address, where it lives on every real chain.
+#
+# This is not cosmetic. The bundler's chain spec (deploy/rundler/chain.toml) names one EntryPoint
+# address, and the backend's CHAINS config names another; if they disagree the backend signs
+# attestations bound to one EntryPoint while the bundler submits to a different one, and every
+# sponsorship fails on chain with an opaque AA34. `forge create` lands wherever the deployer's nonce
+# puts it, so pinning the local chain to the canonical address is what keeps the two in agreement —
+# and makes the devnet match production, where the address is the same on every chain.
+#
+# Copying runtime code is sound here: the EntryPoint's constructor deploys a SenderCreator and holds
+# it as an immutable, so the mirrored code still points at a real, deployed SenderCreator — and
+# `SenderCreator.createSender` has no access control, so being called by the mirror rather than by
+# its creator is fine. Storage at the canonical address starts empty, which is what a fresh chain
+# should have.
+ENTRY_POINT="${CANONICAL_ENTRYPOINT_V07}"
+log "mirroring EntryPoint to the canonical address ${ENTRY_POINT}"
+cast rpc anvil_setCode "${ENTRY_POINT}" \
+  "$(cast code "${DEPLOYED_ENTRY_POINT}" --rpc-url "${RPC_URL}")" --rpc-url "${RPC_URL}" >/dev/null
+
+if [ "$(cast code "${ENTRY_POINT}" --rpc-url "${RPC_URL}")" = "0x" ]; then
+  echo "failed to place the EntryPoint at ${ENTRY_POINT}; is this node anvil?" >&2
+  exit 1
+fi
 
 log "deploying SimpleAccountFactory"
 FACTORY="$(forge create --rpc-url "${RPC_URL}" --private-key "${DEPLOYER_KEY}" --broadcast --json \
@@ -133,8 +160,10 @@ SMART_ACCOUNT=${SMART_ACCOUNT}
 # Backend
 SPONSORSHIP_SIGNER_KEY=${SPONSOR_SIGNER_KEY}
 BOOTSTRAP_API_KEY=${API_KEY}
-# Single-quoted: the JSON contains characters (braces, colons, quotes) that bash `source` would
-# otherwise try to interpret. Compact form, so no spaces break the value either.
+# Single-quoted: the JSON contains characters (braces, colons, quotes) that sourcing this file
+# would otherwise try to interpret. Compact form, so no spaces break the value either.
+# NOTE: this block is an UNQUOTED heredoc, so it is expanded as it is written. Never use backticks
+# in it, even inside a comment - they are command substitution and bash will run them.
 CHAINS='${CHAINS_JSON}'
 
 # SDK example (sdk/examples/sponsor-and-send.ts)

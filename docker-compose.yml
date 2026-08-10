@@ -18,7 +18,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
       POSTGRES_DB: paymaster
     ports:
-      - "127.0.0.1:5432:5432"
+      # Host port is overridable because a developer machine very often already runs Postgres on
+      # 5432; the default is unchanged. Nothing inside the stack uses the host port — the backend
+      # reaches postgres over the compose network — so remapping this costs nothing.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -35,7 +38,7 @@ services:
     # caller a fresh quota, which is a spend event rather than a data-loss event.
     command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000"]
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -51,7 +54,7 @@ services:
     entrypoint: ["anvil"]
     command: ["--host", "0.0.0.0", "--port", "8545", "--chain-id", "31337", "--silent"]
     ports:
-      - "127.0.0.1:8545:8545"
+      - "127.0.0.1:${ANVIL_HOST_PORT:-8545}:8545"
     healthcheck:
       test:
         - CMD-SHELL
@@ -86,14 +89,28 @@ services:
     volumes:
       - ./deploy/rundler:/config:ro
     ports:
-      - "127.0.0.1:3001:3001"
-      - "127.0.0.1:8081:8081"
+      - "127.0.0.1:${BUNDLER_HOST_PORT:-3001}:3001"
+      - "127.0.0.1:${BUNDLER_METRICS_HOST_PORT:-8081}:8081"
     healthcheck:
+      # A real JSON-RPC round trip, spoken over bash's /dev/tcp. The rundler image ships neither
+      # wget nor curl, so the obvious probe silently never passes: the container sits in
+      # "health: starting" forever, and anything waiting on `condition: service_healthy` for it
+      # would hang indefinitely rather than fail. bash is present, and this needs nothing else.
+      #
+      # It asserts the RPC ANSWERS, not merely that the port is open — rundler accepts connections
+      # before it is ready to serve, so a TCP-connect check would report healthy too early.
+      #
+      # The `$$` are escapes: compose interpolates `$` itself, so a single `$` here would be
+      # substituted at parse time and the container would receive an empty string.
       test:
-        - CMD-SHELL
+        - CMD
+        - bash
+        - -c
         - >-
-          wget -qO- --post-data='{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}'
-          --header='Content-Type: application/json' http://127.0.0.1:3001 | grep -q result
+          body='{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}';
+          exec 3<>/dev/tcp/127.0.0.1/3001 || exit 1;
+          printf 'POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "$${#body}" "$$body" >&3;
+          grep -q '"result"' <&3
       interval: 5s
       timeout: 5s
       retries: 30
@@ -118,6 +135,11 @@ services:
       SPONSORSHIP_SIGNER_KEY: "${SPONSORSHIP_SIGNER_KEY:?set SPONSORSHIP_SIGNER_KEY in .env}"
       BOOTSTRAP_API_KEY: "${BOOTSTRAP_API_KEY:?set BOOTSTRAP_API_KEY in .env - generate one with npm run key:generate}"
       CHAINS: "${CHAINS:?set CHAINS in .env - see backend/.env.example}"
+      # With a database, policies come from it — and a fresh database has none, so the quickstart
+      # would fail naming a policy nobody was told to create. Seeds the bootstrap policy into an
+      # EMPTY policy table only. Off by default everywhere else; in production, policies are the
+      # operator's deliberate act.
+      BOOTSTRAP_DEFAULT_POLICY: "${BOOTSTRAP_DEFAULT_POLICY:-true}"
       # Tracing is off unless asked for: with no collector running, an enabled exporter would just
       # log a failed POST every few seconds. Bring up the monitoring profile first, then set
       # OTEL_TRACES_ENABLED=true in .env.
@@ -125,7 +147,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}"
       OTEL_SERVICE_NAME: paymaster
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${BACKEND_HOST_PORT:-3000}:3000"
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 5s

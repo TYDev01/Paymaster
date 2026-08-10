@@ -177,6 +177,12 @@ curl -X POST $URL/admin/keys -H "Authorization: Bearer $BOOTSTRAP_API_KEY" \
 The secret is returned once and never again — only its hash is stored. Create the policy before the
 key that pins to it. Policy shapes and rule types are in [OPERATIONS.md](OPERATIONS.md).
 
+**A fresh database has no policies**, and with `DATABASE_URL` set the in-code default set is never
+consulted — so the first sponsorship fails with "no policy with id default" until you create one.
+Either create it through the admin API (the production path: the policy that decides what to sponsor
+should be deliberate), or set `BOOTSTRAP_DEFAULT_POLICY=true` for a non-production environment,
+which seeds the bounded default policy into an empty policy table and never touches a non-empty one.
+
 A revoked bootstrap key stays revoked across restarts: its row id is derived from the key's hash, so
 re-deploying with the same `BOOTSTRAP_API_KEY` does not resurrect it. Rotating means setting a new
 one.

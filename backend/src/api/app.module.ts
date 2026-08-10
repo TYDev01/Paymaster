@@ -1,7 +1,7 @@
 import {randomUUID} from "node:crypto";
 import {hostname} from "node:os";
 
-import {Module, type DynamicModule, type Provider} from "@nestjs/common";
+import {Logger, Module, type DynamicModule, type Provider} from "@nestjs/common";
 import IORedis, {type Redis} from "ioredis";
 
 import {hashApiKey} from "../auth/apiKey.js";
@@ -42,6 +42,7 @@ import {SignatureEngine} from "../signature/signatureEngine.js";
 import {LocalSponsorshipSigner, type SponsorshipSigner} from "../signature/signer.js";
 import {KmsSponsorshipSigner} from "../signature/kmsSigner.js";
 import {AwsKmsClient} from "../signature/awsKmsClient.js";
+import {defaultPolicyDefinition} from "../config/defaultPolicies.js";
 import {parseChainsJson, parseOtlpHeaders, type Env} from "../config/env.js";
 import {API_KEY_AUTHENTICATOR, JWT_VERIFIER, SECURITY_IP_THROTTLE} from "./guards/apiKey.guard.js";
 import {AuthController} from "./admin/auth.controller.js";
@@ -243,6 +244,10 @@ export async function buildDependencies(
   const policyRepository =
     pool === undefined ? undefined : new PostgresPolicyRepository(pool, new PolicyFactory(quotas, tokenReader));
 
+  if (policyRepository !== undefined && env.BOOTSTRAP_DEFAULT_POLICY) {
+    await ensureBootstrapPolicy(policyRepository, env);
+  }
+
   const repository: PolicyRepository = policyRepository ?? {load: async () => makePolicies(quotas)};
   const policySource = new PolicySource(repository);
   await policySource.reload();
@@ -433,6 +438,23 @@ function buildBackgroundServices(
   }
 
   return services;
+}
+
+/**
+ * Seeds the bootstrap policy, but only into an EMPTY policy table.
+ *
+ * The emptiness check is the whole safety property. Upserting unconditionally would overwrite an
+ * operator's edited default on every restart, and would resurrect a policy they had deliberately
+ * deleted — both of which silently change what gets sponsored. "Only when there is nothing at all"
+ * is the one condition under which seeding cannot destroy information.
+ */
+async function ensureBootstrapPolicy(repository: PostgresPolicyRepository, env: Env): Promise<void> {
+  const existing = await repository.list();
+  if (existing.length > 0) return;
+
+  const logger = new Logger("bootstrap");
+  await repository.upsert(defaultPolicyDefinition(env));
+  logger.log(`seeded the bootstrap policy "${env.DEFAULT_POLICY_ID}" into an empty policy table`);
 }
 
 /**
