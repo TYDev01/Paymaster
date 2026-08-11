@@ -16,3 +16,7 @@ backend/dist
 *.yml
 *.yaml
 
+
+# The frontend formats itself through its own tooling; the root Prettier config is tuned to
+# the backend's house style (no bracket spacing, 120 cols) and would fight it.
+frontend

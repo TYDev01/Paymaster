@@ -15,7 +15,17 @@ import globals from "globals";
 
 export default tseslint.config(
   {
-    ignores: ["**/node_modules/**", "**/dist/**", "**/build/**", "**/coverage/**", "contracts/**", "**/*.js"],
+    // frontend/ is a standalone Next project with its own eslint config (eslint-config-next) and its
+    // own npm install; linting it from here would apply the backend's rules to a React codebase.
+    ignores: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/build/**",
+      "**/coverage/**",
+      "contracts/**",
+      "frontend/**",
+      "**/*.js",
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

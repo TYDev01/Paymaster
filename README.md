@@ -44,6 +44,7 @@ tests have each been shown to fail when the code they guard is broken. See
 | [contracts/](contracts/) | Foundry project: `VerifyingPaymaster.sol`, deploy script, 35 tests |
 | [backend/](backend/) | NestJS sponsorship + admin API, policy/signature engines, DB, Redis |
 | [sdk/](sdk/) | Framework-agnostic TypeScript SDK + runnable example |
+| [frontend/](frontend/) | Operations console (Next.js): live metrics, chains, funding, alerts |
 | [deploy/](deploy/) | Devnet setup, multi-chain deploy + verification, Helm chart, monitoring config, k6 load test |
 | [docker-compose.yml](docker-compose.yml) | Dev stack: postgres, redis, anvil, bundler, backend |
 | [docs/](docs/) | Architecture, security, deployment, operations, runbooks, DR, monitoring, development |
@@ -139,6 +140,7 @@ something to point at mainnet without the hardening listed below.**
 | Cross-replica policy propagation + leader lock | ✅ vs real Redis |
 | Load, property-based and forked-chain tests | ✅ incl. mainnet fork vs the real EntryPoint |
 | Documentation set | ✅ see [docs/](docs/) |
+| Operations console (Next.js) | ✅ reads the real /metrics, /health and admin API |
 | Docker Compose stack | ✅ booted end to end, incl. the monitoring profile |
 
 Coverage is measured against the full suite — Postgres, Redis, anvil, rundler and a mainnet fork
