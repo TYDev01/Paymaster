@@ -151,6 +151,12 @@ included — not estimated:
 | Contracts | 100% | 100% | 100% | 100% |
 | Backend | 82.86% | 82.86% | 89.14% | 83.85% |
 
+**Not built — a different product shape:** this is a SINGLE-TENANT paymaster (one operator, one
+shared deposit per chain, keys minted by that operator), which is what td.md and td2.md specify. The
+self-service SaaS shape — signup, per-tenant API keys, per-tenant funded balances, billing — needs a
+tenant model and a credit ledger that do not exist yet. Scoped in
+[docs/REMAINING.md](docs/REMAINING.md#-not-built-the-multi-tenant-saas-product).
+
 **Not yet done — deployment decisions rather than missing work:**
 
 - **Alertmanager routing** is not configured; routing, silencing and escalation are per-deployment.

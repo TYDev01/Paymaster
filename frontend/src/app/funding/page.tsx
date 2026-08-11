@@ -1,6 +1,6 @@
 "use client";
 
-import {LuCoins, LuLock, LuTriangleAlert} from "react-icons/lu";
+import {LuCoins, LuInfo, LuLock, LuTriangleAlert} from "react-icons/lu";
 
 import {PageHeader} from "@/components/panels/page-header";
 import {Panel, EmptyState} from "@/components/viz/panel";
@@ -24,6 +24,8 @@ export default function FundingPage() {
         title="Funding"
         description="The deposit pays for sponsored gas; the stake is what lets a bundler accept our operations at all. Both are per chain, and both are read from the EntryPoint."
       />
+
+      <TopUpNote />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <StatTile
@@ -74,6 +76,39 @@ export default function FundingPage() {
         </Panel>
       </div>
     </>
+  );
+}
+
+/**
+ * Why there is no "Fund" button here.
+ *
+ * `deposit()` is not owner-gated and a bare transfer is forwarded into the EntryPoint deposit, so a
+ * top-up from a wallet is technically a few lines. The reason it is not offered is that this is ONE
+ * deposit shared by every caller: with no per-tenant ledger, whoever funded it would be funding the
+ * pool everyone spends from, and nothing in the system could say whose balance had been consumed.
+ *
+ * Shipping the button before the ledger would make that ambiguity look like a feature. The gap and
+ * what closing it requires are written up in docs/REMAINING.md.
+ */
+function TopUpNote() {
+  return (
+    <div className="mb-4 flex gap-3 rounded-lg border border-ash-800 bg-oil-900 px-4 py-3">
+      <LuInfo className="mt-0.5 size-4 shrink-0 text-ash-500" aria-hidden />
+      <div className="min-w-0 text-xs leading-relaxed text-ash-400">
+        <p>
+          <span className="font-medium text-ash-200">Topping up is an operator action, not a console one.</span>{" "}
+          Anyone can add to the deposit — it is not owner-gated — but this is a single shared deposit per
+          chain, so a top-up funds sponsorship for every caller rather than one account.
+        </p>
+        <p className="mt-1.5 text-ash-600">
+          Per-account balances need a tenant ledger, which does not exist yet. Until then, fund from the
+          operator wallet:
+        </p>
+        <code className="mt-1.5 block overflow-x-auto rounded border border-ash-800 bg-oil-950 px-2 py-1.5 font-mono text-[11px] text-ash-300">
+          cast send &lt;paymaster&gt; &quot;deposit()&quot; --value 1ether --rpc-url $RPC_URL
+        </code>
+      </div>
+    </div>
   );
 }
 

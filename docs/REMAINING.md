@@ -5,7 +5,7 @@ Every item here has been flagged during the build; nothing is aspirational fille
 by whether they **block production**, are **spec-required but non-blocking**, or are **hardening**.
 
 Legend: 🔴 blocks production · 🟡 spec-required, not blocking · 🟢 hardening / nice-to-have ·
-✅ done this pass
+🔵 beyond the current spec · ✅ done this pass
 
 ---
 
@@ -58,6 +58,97 @@ deployment-specific decisions: Alertmanager routing, and tuning two alert thresh
 
 Both the image and the chart are now built and rendered in CI (the `deploy-artifacts` job), because
 every defect found in them survived precisely as long as nothing built them.
+
+---
+
+## 🔵 Not built: the multi-tenant SaaS product
+
+**This is the largest open item, and it is a change of product shape rather than a feature.** What
+exists today is a SINGLE-TENANT paymaster: one operator, one shared deposit per chain, one policy
+set, and API keys minted by that operator through an authenticated admin API. td.md and td2.md
+describe exactly that, and it is built.
+
+The intended product is different: a self-service platform where a dApp developer signs up, gets
+their own API key, funds their own balance, and spends only what they funded. Everything below is
+what separates the two.
+
+### Why the Funding page has no "Fund" button
+
+The button is the easy part; it would be dishonest without the ledger behind it.
+
+`deposit()` on the paymaster is deliberately not owner-gated and `receive()` forwards a bare
+transfer into the EntryPoint deposit, so anyone can already top it up from a wallet. But there is
+**one deposit per chain, shared by every caller**. With no per-tenant accounting, a customer who
+funded it would be funding the pool that everyone else spends from — their money would subsidise
+other tenants, and nothing in the system could tell you whose balance had been consumed.
+
+So the missing piece is not UI. It is a **balance that belongs to someone**.
+
+### What has to exist first
+
+In dependency order — each item needs the ones above it.
+
+1. **A tenant model.** Organisations, users, membership, and a tenant id on every row that can be
+   attributed. There is no such concept anywhere in the codebase today (`grep tenant` returns
+   nothing), and retrofitting one touches every admin query.
+2. **Authentication for humans.** The current auth is machine-to-machine: API keys, plus optional
+   operator JWTs. Privy would sit in front as the human identity provider (social login + embedded
+   wallet), exchanged for a session bound to a tenant. The existing `JwtService` is a reasonable
+   place for that session to land; the API-key path stays exactly as it is for the dApp's server.
+3. **Self-service key issuance.** Keys are currently minted by an operator holding `key:write`, and
+   the roles (`sponsor`/`viewer`/`admin`) are operator-shaped. A tenant needs to mint keys scoped to
+   its OWN tenant and nothing else, which means a new role and — critically — tenant scoping
+   enforced in the store, not in the controller. A missing `WHERE tenant_id = $1` in one query is a
+   cross-tenant data leak.
+4. **A credit ledger.** The hard part, and the one that decides the product.
+
+   The chain gives us one deposit per paymaster address, so per-tenant on-chain deposits would mean
+   a paymaster contract per tenant — expensive to deploy, stake and monitor, and it multiplies the
+   stake requirement by the tenant count. The workable shape is the standard one: **a shared
+   on-chain deposit plus an off-chain credit ledger**. A tenant funds their balance (crypto transfer
+   or card), sponsorship debits it, and the operator keeps the shared deposit topped up.
+
+   That makes the ledger financially load-bearing, and it has to be exact:
+   - debits must be **reserved** at signing time and **trued up** to actual on-chain cost, which is
+     the same two-phase shape the spend caps already use;
+   - a tenant at zero must be refused **fail-closed**, because past zero the operator is paying;
+   - the ledger must reconcile against the on-chain deposit, or slow drift becomes unexplained loss.
+5. **Billing.** Usage metering, a pricing model (gas at cost plus margin, or a subscription), an
+   invoice, and a payment rail. Also the operational question of what happens when a card fails
+   while operations are in flight.
+6. **Tenant-scoped policy.** Today a policy is global and edited by the operator. A tenant needs to
+   edit its own policy, bounded by platform limits it cannot raise — nested limits, not a flat set.
+7. **The frontend for all of it.** Signup, org management, keys, funding, usage, invoices. The
+   current console is an OPERATOR view and read-only by design; this is a second, tenant-facing
+   surface with write paths and wallet connection.
+
+### What it can build on
+
+The foundations are better than they look, because per-key attribution already exists:
+
+- `sponsorships` records `api_key_id`, `max_cost_wei` and — once the reconciler has run —
+  `actual_gas_cost_wei`, indexed by `(api_key_id, created_at)`. That is a usage meter already.
+- `SpendReconciler` already trues reserved cost up to actual on-chain cost. A credit ledger needs
+  exactly that mechanism, pointed at a balance instead of a window counter.
+- `QuotaRule` already supports an `apiKey` subject, so per-key spend limits work today.
+- The policy engine's reserve/release shape is the right one for debiting a balance.
+
+The genuinely new work is the tenant boundary, the balance itself, and billing.
+
+### Decisions needed before any of it is built
+
+These are product and legal calls, not technical ones, and they change the design:
+
+- **Custody.** A shared deposit funded by customers means the operator holds customer funds. That is
+  a regulatory question in most jurisdictions before it is an engineering one.
+- **Funding rail.** Crypto only (simplest, no card processor, but the balance is a deposit the
+  operator custodies) or fiat via a processor (a different compliance surface).
+- **Pricing.** Gas at cost plus margin, prepaid credits, or a subscription with an included
+  allowance — each implies a different ledger.
+- **Isolation.** One shared paymaster contract for all tenants (cheap, but every tenant shares a
+  reputation and a pause switch) or one per large tenant (isolated, far more to operate).
+
+Until those are settled, building the ledger would be guessing at the thing hardest to change later.
 
 ---
 
