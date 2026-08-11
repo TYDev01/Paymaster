@@ -1,4 +1,5 @@
 import {parseChainsJson, type Env} from "./env.js";
+import type {PolicyDefinition} from "../db/postgresPolicyRepository.js";
 import type {Policy} from "../policy/engine.js";
 import {InMemoryQuotaStore} from "../policy/quota/inMemoryQuotaStore.js";
 import type {QuotaStore} from "../policy/quota/quotaStore.js";
@@ -8,11 +9,12 @@ import {QuotaRule} from "../policy/rules/quotaRules.js";
 /**
  * The bootstrap policy set.
  *
- * This is real configuration, not a stand-in: it is the policy the service serves until the
- * database-backed PolicyRepository lands and `PolicySource` starts reloading from there. It
- * implements td.md's "sponsor everyone" — no allowlist — but bounded by per-wallet and per-IP
- * quotas, because an unbounded "sponsor everyone" paymaster is a faucet that drains its deposit to
- * the first script that finds it.
+ * This is real configuration, not a stand-in. It implements td.md's "sponsor everyone" — no
+ * allowlist — but bounded by per-wallet and per-IP quotas, because an unbounded "sponsor everyone"
+ * paymaster is a faucet that drains its deposit to the first script that finds it.
+ *
+ * WITHOUT a database this is the policy set the service serves. WITH one, policies come from the
+ * database and this is used only to seed it — see `defaultPolicyDefinition` below.
  *
  * The store defaults to in-memory, which is per-process. With more than one replica each caller
  * effectively gets one quota per replica. `bootstrap` warns about this; the Redis adapter is what
@@ -62,4 +64,78 @@ export function defaultPolicies(env: Env, store: QuotaStore = new InMemoryQuotaS
       ],
     },
   ];
+}
+
+/**
+ * The same bootstrap policy, as a storable DEFINITION.
+ *
+ * With a database configured, `PolicySource` loads from it and the in-code set above is never
+ * consulted — so a fresh database means no policies at all, and every sponsorship fails with
+ * "no policy with id default". That is correct for production, where policies are the operator's,
+ * but it makes the documented quickstart impossible: bring the stack up, request a sponsorship,
+ * get an error that names a policy nobody was told to create.
+ *
+ * `BOOTSTRAP_DEFAULT_POLICY` closes that, the same way `BOOTSTRAP_API_KEY` closes the equivalent
+ * chicken-and-egg for credentials: opt-in, never a default in production, and seeded ONLY when the
+ * policy table is empty — so it can never overwrite an operator's policy set or resurrect one they
+ * deliberately deleted.
+ *
+ * The two representations are kept deliberately identical in effect. A drift between them would
+ * mean the with-database and without-database deployments quietly sponsor different things.
+ */
+export function defaultPolicyDefinition(env: Env): PolicyDefinition {
+  const enabledChainIds = parseChainsJson(env.CHAINS)
+    .filter((c) => c.enabled)
+    .map((c) => c.chainId);
+
+  return {
+    id: env.DEFAULT_POLICY_ID,
+    name: "Default (bootstrap)",
+    description: "Seeded by BOOTSTRAP_DEFAULT_POLICY. Sponsor everyone, bounded by quotas.",
+    enabled: true,
+    rules: [
+      {ruleType: "chain-enabled", config: {chainIds: enabledChainIds}},
+      {
+        ruleType: "quota",
+        config: {
+          name: "wallet-daily-ops",
+          subject: "wallet",
+          unit: "operations",
+          limit: "100",
+          windowSeconds: 86_400,
+        },
+      },
+      {
+        ruleType: "quota",
+        config: {
+          name: "wallet-daily-spend",
+          subject: "wallet",
+          unit: "wei",
+          limit: "100000000000000000",
+          windowSeconds: 86_400,
+        },
+      },
+      {
+        ruleType: "quota",
+        config: {
+          name: "ip-hourly-ops",
+          subject: "ip",
+          unit: "operations",
+          limit: "200",
+          windowSeconds: 3_600,
+          onMissingSubject: "skip",
+        },
+      },
+      {
+        ruleType: "quota",
+        config: {
+          name: "global-daily-spend",
+          subject: "global",
+          unit: "wei",
+          limit: "10000000000000000000",
+          windowSeconds: 86_400,
+        },
+      },
+    ],
+  };
 }

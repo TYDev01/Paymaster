@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Sponsorship backend: signature engine, policy engine, chain adapters, and APIs.",
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

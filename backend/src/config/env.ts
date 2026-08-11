@@ -114,6 +114,15 @@ export const envSchema = z
     RECONCILER_INITIAL_LOOKBACK_BLOCKS: z.coerce.number().int().min(0).max(10_000_000).default(5_000),
 
     /**
+     * Seeds the bootstrap policy into an EMPTY policy table, solving the same chicken-and-egg
+     * BOOTSTRAP_API_KEY solves for credentials: with a database configured, policies come from it,
+     * and a fresh database has none — so every sponsorship fails naming a policy nobody was told to
+     * create. Off by default, because a policy that decides what to sponsor should be the
+     * operator's deliberate act in production. Only ever inserted when no policy exists.
+     */
+    BOOTSTRAP_DEFAULT_POLICY: boolFromEnv(false),
+
+    /**
      * Policy convergence across replicas.
      *
      * `PolicySource` holds the policy set in memory; an admin write reloads only the replica that

@@ -1,0 +1,21 @@
+// Emit configuration, used only to build the production image.
+//
+// The base tsconfig is `noEmit` because everything in development and test runs through tsx/vitest,
+// which transpile in memory. The container is the one place that wants real JavaScript on disk: the
+// runtime image then contains no compiler and no dev dependencies, which is the property the
+// Dockerfile's stages exist to provide. Running `tsx` in production would have put esbuild — and the
+// dev dependency tree it comes with — into the image the service actually runs.
+//
+// Tests are excluded: the image must not carry them, and a test that fails to compile should fail
+// in `npm run typecheck`, not in a release build.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "sourceMap": true,
+    "declaration": false
+  },
+  "include": ["src/**/*.ts"]
+}

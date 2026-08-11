@@ -69,8 +69,26 @@ cd sdk && npx tsx examples/sponsor-and-send.ts
 #    -> success: true; account balance (unchanged, it paid nothing): 0 wei
 ```
 
-The Docker Compose stack ([docker-compose.yml](docker-compose.yml)) packages the same components;
-see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#deployment).
+### Or the whole thing in Docker
+
+The contracts have to exist before the backend starts — it validates `CHAINS` at boot and refuses a
+chain whose EntryPoint has no code — so the chain comes up first:
+
+```bash
+docker compose up -d anvil
+./deploy/local-setup.sh                    # deploys EntryPoint, factory, paymaster; writes deploy/.env.local
+
+# Put the generated values in .env, pointing CHAINS at the container network rather than localhost:
+#   SPONSORSHIP_SIGNER_KEY / BOOTSTRAP_API_KEY  copied from deploy/.env.local
+#   CHAINS                                      same, with http://127.0.0.1:8545 -> http://anvil:8545
+docker compose up -d                       # postgres, redis, bundler, backend
+
+cd sdk && npx tsx examples/sponsor-and-send.ts
+```
+
+Add `--profile monitoring` for Prometheus, Grafana (:3002) and an OTel collector. If the host
+already runs Postgres or Redis, set `POSTGRES_HOST_PORT` / `REDIS_HOST_PORT` in `.env` — nothing
+inside the stack uses those host ports.
 
 ## Testing
 
@@ -121,6 +139,7 @@ something to point at mainnet without the hardening listed below.**
 | Cross-replica policy propagation + leader lock | ✅ vs real Redis |
 | Load, property-based and forked-chain tests | ✅ incl. mainnet fork vs the real EntryPoint |
 | Documentation set | ✅ see [docs/](docs/) |
+| Docker Compose stack | ✅ booted end to end, incl. the monitoring profile |
 
 Coverage is measured against the full suite — Postgres, Redis, anvil, rundler and a mainnet fork
 included — not estimated:
@@ -130,14 +149,11 @@ included — not estimated:
 | Contracts | 100% | 100% | 100% | 100% |
 | Backend | 80.99% | 80.99% | 89.07% | 83.03% |
 
-**Not yet done — required before production:**
+**Not yet done — deployment decisions rather than missing work:**
 
-- **The Docker Compose stack has not been run end-to-end** in this environment (no Docker daemon);
-  its individual components all run outside Docker, and `docker compose config` is clean. This is
-  the one remaining item that blocks production.
-- **Alertmanager routing** is not configured, and two alert-rule thresholds ship as placeholders that
-  must be tuned to real traffic.
-- The Helm chart has not been run through `helm lint` / `helm template` here.
+- **Alertmanager routing** is not configured; routing, silencing and escalation are per-deployment.
+- Two alert-rule thresholds ship as `TUNE` placeholders that need real traffic to set.
+- The Helm chart has not been run through `helm lint` / `helm template` here (no `helm` binary).
 
 Full detail, including what was deliberately *not* built and why, is in
 [docs/REMAINING.md](docs/REMAINING.md).
