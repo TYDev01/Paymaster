@@ -138,8 +138,11 @@ helm upgrade --install paymaster deploy/helm/paymaster \
 ```
 
 The chart is documented in [deploy/helm/paymaster/README.md](../deploy/helm/paymaster/README.md).
-Note it has NOT been lint-checked in this repository's environment — run `helm lint` and
-`helm template` before your first install.
+`helm lint` and `helm template` run in CI.
+
+The chart refuses to render an install that would not start: no `config.chains`, no secret source,
+or `alerting.format=pagerduty` without a routing key each fail with a message naming what is
+missing, rather than producing YAML that becomes a CrashLoopBackOff.
 
 Secrets are bring-your-own by default. `secrets.create: true` puts them in Helm release history in
 plaintext and exists for throwaway environments only; use External Secrets, Vault, or SOPS.

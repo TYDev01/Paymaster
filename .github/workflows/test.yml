@@ -116,3 +116,84 @@ jobs:
 
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
+
+  # ------------------------------------------------------------------------------------------------
+  # The deployment artifacts, built rather than parsed.
+  #
+  # This job exists because "docker compose config is clean" and "helm lint passes" turned out not to
+  # mean the image builds or the chart installs. The image had a COPY of a path npm never creates and
+  # a CMD invoking a devDependency stripped from the image; the chart rendered a Deployment mounting
+  # a Secret its own defaults never create. All three were invisible until something actually built
+  # and ran them. So CI does.
+  # ------------------------------------------------------------------------------------------------
+  deploy-artifacts:
+    name: Deployment artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Builds every stage, so a broken COPY or a failing typecheck fails here rather than at deploy.
+      - name: Build the backend image
+        run: docker build -f backend/Dockerfile -t paymaster-backend:ci .
+
+      # The image must RUN, not merely build: the previous CMD (`npx tsx`) built fine and could never
+      # start, because tsx is a devDependency and the image is installed --omit=dev. Starting with a
+      # deliberately invalid environment proves the entrypoint executes — the expected outcome is the
+      # backend's own validation error, which only a working runtime can produce.
+      - name: The image starts and reaches its own env validation
+        run: |
+          output=$(docker run --rm -e CHAINS= paymaster-backend:ci 2>&1 || true)
+          echo "$output"
+          echo "$output" | grep -q "invalid environment" \
+            || { echo "::error::the image did not reach env validation — the entrypoint is broken"; exit 1; }
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint the chart
+        run: helm lint deploy/helm/paymaster
+
+      # A default `helm install` must fail LOUDLY on missing required values, not render YAML that
+      # produces CrashLoopBackOff once applied.
+      - name: The chart refuses an incomplete install
+        run: |
+          if helm template paymaster deploy/helm/paymaster > /dev/null 2>&1; then
+            echo "::error::the chart rendered with no chains and no secret; it should have failed"
+            exit 1
+          fi
+
+      # And a complete one renders, with the alert rules injected from their single canonical copy.
+      - name: The chart renders a complete install
+        run: |
+          helm template paymaster deploy/helm/paymaster \
+            --set config.chains='[]' \
+            --set secrets.existingSecret=paymaster-secrets \
+            --set serviceMonitor.enabled=true \
+            --set prometheusRule.enabled=true \
+            --set-file prometheusRule.rulesYaml=deploy/monitoring/prometheus/alerts.yml \
+            > rendered.yaml
+          python3 - <<'PY'
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open("rendered.yaml")) if d]
+          kinds = {d["kind"] for d in docs}
+          for required in ("Deployment", "ConfigMap", "Service", "PrometheusRule", "ServiceMonitor"):
+              if required not in kinds:
+                  sys.exit(f"chart did not render a {required}: got {sorted(kinds)}")
+          rules = sum(len(g["rules"]) for d in docs if d["kind"] == "PrometheusRule" for g in d["spec"]["groups"])
+          if rules == 0:
+              sys.exit("PrometheusRule rendered with no rules — the --set-file injection is broken")
+          print(f"rendered {len(docs)} objects, {rules} alert rules")
+          PY
+
+      # The compose stack is not booted here (it needs contracts deployed first), but its config must
+      # still interpolate — a missing variable is a broken stack for everyone who runs it.
+      - name: Compose config resolves, including the monitoring profile
+        run: |
+          SPONSORSHIP_SIGNER_KEY=0x$(printf '1%.0s' {1..64}) \
+          BOOTSTRAP_API_KEY=pm_test_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+          CHAINS='[]' \
+          docker compose --profile monitoring config > /dev/null

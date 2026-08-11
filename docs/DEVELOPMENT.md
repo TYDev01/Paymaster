@@ -110,7 +110,7 @@ npx vitest --workspace @paymaster/backend  # watch
 (cd contracts && forge test -vvv)
 ```
 
-Backend coverage is **80.99% of statements** across 449 tests; the contract is at **100% of lines,
+Backend coverage is **82.86% of statements** across 454 tests; the contract is at **100% of lines,
 statements, branches and functions**, and CI fails if that drops.
 
 The suite is layered, and the layers are not interchangeable:

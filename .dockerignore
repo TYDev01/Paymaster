@@ -1,0 +1,45 @@
+# What never belongs in the image build context.
+#
+# Without this the context is ~385MB and, worse, `COPY backend/ ./backend/` in the build stage
+# copies the HOST's node_modules over the ones `npm ci` just installed in the image. Those are built
+# for the host's platform and architecture; on any cross-platform build (an arm64 laptop producing
+# an amd64 image, which is the common case) the result is an image containing native binaries that
+# cannot run. It works by accident today only because nothing in this tree ships a native addon.
+#
+# Everything the Dockerfile actually needs is named explicitly in it: the package manifests, the
+# lockfile, backend/src, backend/migrations and backend/tsconfig*.json.
+
+# Dependencies — installed inside the image, never copied into it.
+node_modules
+**/node_modules
+
+# Build and test output. `dist` is produced by the build stage; a stale host copy must not shadow it.
+dist
+**/dist
+coverage
+**/coverage
+*.tsbuildinfo
+
+# The pinned rundler binary (~54MB) fetched for the integration tests. Nothing in the image runs it.
+backend/.bundler
+
+# Foundry output and submodules. The backend image contains no contracts; artifacts are read by the
+# TEST suite, which runs outside the image.
+contracts/out
+contracts/cache
+contracts/lib
+contracts/broadcast
+
+# Not part of the service.
+.git
+.github
+docs
+deploy
+sdk
+*.md
+
+# Local configuration and secrets. `.env` holds a signer key on a dev machine; it must never be
+# baked into a layer, where it survives every later deletion.
+.env
+.env.*
+!.env.example

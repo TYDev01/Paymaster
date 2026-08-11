@@ -52,10 +52,12 @@ Legend: 🔴 blocks production · 🟡 spec-required, not blocking · 🟢 harde
   wired into CI. Coverage numbers are deliberately not cited until the full suite is run.
 
 **Nothing on td.md's or td2.md's lists is now outstanding.** Every item is either done — including
-the Docker Compose stack, booted and verified end to end — or listed under "Deliberately NOT built"
-with its reasoning. What remains are deployment-specific decisions (Alertmanager routing, tuning two
-alert thresholds to real traffic) and `helm lint`, which needs a `helm` binary this environment does
-not have.
+the Docker Compose stack, booted and verified end to end, and the Helm chart, now linted and
+rendered — or listed under "Deliberately NOT built" with its reasoning. What remains are
+deployment-specific decisions: Alertmanager routing, and tuning two alert thresholds to real traffic.
+
+Both the image and the chart are now built and rendered in CI (the `deploy-artifacts` job), because
+every defect found in them survived precisely as long as nothing built them.
 
 ---
 
@@ -143,15 +145,28 @@ accepts either credential, disambiguated by shape (a `pm_*` key vs a JWT). Enabl
 on an ERC-20/721 holding, and fails closed. Registered in `policyFactory.ts` with a `token-ownership`
 schema (single token or per-chain map, minimum balance). Tested in `test/policyFactory.test.ts`.
 
-### ✅ Kubernetes / Helm — DONE
+### ✅ Kubernetes / Helm — DONE (linted, rendered, and validated)
 A chart at `deploy/helm/paymaster` (Deployment, Service, ConfigMap, optional Secret, HPA, PDB,
 ServiceMonitor, Ingress, ServiceAccount). The backend's statelessness shows through: it is a plain
 Deployment with no init ordering, because migrations self-serialise via the advisory lock. Liveness
 (`/health/live`) and readiness (`/health/ready`) are separate so an RPC outage sheds traffic without
 restart-looping; the root filesystem is read-only with an in-memory `/tmp`; secrets are bring-your-own
 by default (chart-managed only for dev). Rendered YAML is documented in `deploy/helm/paymaster/README.md`.
-Not linted here — `helm` is not installed in this environment — so run `helm lint` / `helm template`
-before first use.
+
+`helm lint` and `helm template` now run in CI, and rendering the chart found three configurations
+that produced valid YAML and a broken cluster:
+
+- **The default install was broken.** The Deployment mounts a Secret via `envFrom`, but the default
+  values (`create: false`, `existingSecret: ""`) never create one — so pods sat in
+  `CreateContainerConfigError`, a failure that says nothing about secrets.
+- **`config.chains` defaults to empty**, which renders `CHAINS: ""`; the backend rejects it at
+  startup. The single most likely first-install mistake produced a crash loop.
+- **`config.alerting.format=pagerduty`** rendered happily without a routing key, which the backend
+  also rejects at startup — three container restarts away from the value that caused it.
+
+All three now fail at `helm template` time with a sentence naming what is missing
+(`templates/_validate.tpl`), which is the same posture the backend takes with its own environment:
+fail closed, at startup, naming the variable.
 
 ### ✅ Monitoring stack (Prometheus / Grafana / OpenTelemetry) — DONE
 Documented end to end in [docs/MONITORING.md](MONITORING.md), including a runbook entry per alert.
@@ -235,13 +250,13 @@ Flat-config ESLint (`eslint.config.js`, typescript-eslint recommended + prettier
 both.
 
 ### ✅ Measure test coverage — DONE, both workspaces
-The full suite runs in this environment — 449 backend tests across 28 files (Postgres, Redis, anvil,
+The full suite runs in this environment — 454 backend tests across 29 files (Postgres, Redis, anvil,
 rundler and a mainnet fork included) and 35 contract tests — so these are measured, not estimated:
 
 | | Lines | Statements | Branches | Functions |
 | --- | --- | --- | --- | --- |
 | Contracts (`VerifyingPaymaster.sol`) | 100% | 100% | 100% | 100% |
-| Backend (`src/`) | 80.99% | 80.99% | 89.07% | 83.03% |
+| Backend (`src/`) | 82.86% | 82.86% | 89.14% | 83.85% |
 
 `forge coverage` is now wired into CI with a **100% floor** on the contract, so any new uncovered
 path fails the build. Reaching it found two genuinely untested behaviours worth having: `receive()`
