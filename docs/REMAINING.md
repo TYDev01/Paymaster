@@ -91,6 +91,15 @@ In dependency order — each item needs the ones above it.
 1. **A tenant model.** Organisations, users, membership, and a tenant id on every row that can be
    attributed. There is no such concept anywhere in the codebase today (`grep tenant` returns
    nothing), and retrofitting one touches every admin query.
+
+   Note for whichever contract shape wins: a factory using CREATE2 keyed on the tenant id gives the
+   same paymaster address on every chain, which makes the tenant's configuration identical
+   everywhere and is worth having. OZ's `EIP712` is clone-safe — it recomputes the domain separator
+   when `address(this)` differs from the cached one — so minimal proxies do not break the signature
+   domain. The ownership split needs deciding separately: a tenant who fully owns their paymaster
+   can remove the platform's signer and brick their own sponsorship, or withdraw the stake, so
+   "owner" has to be split into platform-controlled signer management and tenant-controlled
+   withdrawal rather than a single `Ownable`.
 2. **Authentication for humans.** The current auth is machine-to-machine: API keys, plus optional
    operator JWTs. Privy would sit in front as the human identity provider (social login + embedded
    wallet), exchanged for a session bound to a tenant. The existing `JwtService` is a reasonable
@@ -135,20 +144,73 @@ The foundations are better than they look, because per-key attribution already e
 
 The genuinely new work is the tenant boundary, the balance itself, and billing.
 
-### Decisions needed before any of it is built
+### Decisions taken
 
-These are product and legal calls, not technical ones, and they change the design:
+- **Funding rail: crypto only**, per chain. No card processor, so no PCI surface and no chargebacks.
+  A tenant funds a balance on each chain they want sponsorship on.
+- **Pricing: subscription.** This resolves well with self-funded gas, and the combination is
+  stronger than either alone: the subscription buys platform access and quota tier, while gas comes
+  out of the tenant's own funded balance. The platform therefore never fronts gas and carries no
+  credit risk on it — the worst case for an unpaid tenant is a suspended account, not a drained
+  deposit. Note that crypto-only subscriptions have no equivalent of a card mandate, so billing is
+  **prepaid periods** (pay for a term up front, with a grace window) rather than a recurring pull.
+- **Chains are administered, not deployed.** Today `CHAINS` is an environment variable, so adding a
+  chain is a redeploy. It moves into the database with admin CRUD and hot reload, exactly like the
+  policy set. One constraint carries over: the registry's startup check — that each RPC serves the
+  chain id it claims and the EntryPoint has code — has to run when a chain is ADDED or ENABLED, not
+  only at boot, or a typo becomes an opaque AA34 on every operation for that chain.
+- **Funds are per tenant, held on chain.** A tenant's balance is theirs, not a line in our ledger
+  that we could get wrong. See the open question below on how that is implemented.
 
-- **Custody.** A shared deposit funded by customers means the operator holds customer funds. That is
-  a regulatory question in most jurisdictions before it is an engineering one.
-- **Funding rail.** Crypto only (simplest, no card processor, but the balance is a deposit the
-  operator custodies) or fiat via a processor (a different compliance surface).
-- **Pricing.** Gas at cost plus margin, prepaid credits, or a subscription with an included
-  allowance — each implies a different ledger.
-- **Isolation.** One shared paymaster contract for all tenants (cheap, but every tenant shares a
-  reputation and a pause switch) or one per large tenant (isolated, far more to operate).
+### Open: per-tenant paymaster, or per-tenant balance inside one paymaster
 
-Until those are settled, building the ledger would be guessing at the thing hardest to change later.
+The instinct — each tenant's money is theirs and visibly separate — is right. The question is
+whether "their own vault" means their own CONTRACT.
+
+**Stake is the constraint.** `EntryPoint.deposits` is `mapping(address => DepositInfo)`, so stake is
+per contract address. A paymaster must be staked to read its own storage during validation
+(ERC-7562), which ours does and always will. So one paymaster per tenant means **one stake per
+tenant per chain**, at rundler's 1 ETH default:
+
+| Tenants | Chains | Stake locked |
+| --- | --- | --- |
+| 10 | 4 | 40 ETH |
+| 50 | 4 | 200 ETH |
+| 200 | 6 | 1,200 ETH |
+
+That capital is idle — it secures nothing but the tenant's own reputation — and it is locked behind
+the unstake delay, so it cannot be recovered quickly when a tenant leaves. It is very likely to
+dominate the economics of the product before the gas does.
+
+The rest of the per-tenant-contract cost is real but secondary: deploy gas per tenant per chain, a
+funding monitor that iterates tenants × chains rather than chains, alerting whose cardinality now
+grows with the customer count, and a cold bundler reputation for every new tenant.
+
+**The alternative keeps the vault idea and drops the stake multiplier:** one shared, staked
+paymaster that holds `mapping(tenantId => uint256)` in its OWN storage. A staked paymaster may read
+its own storage during validation, which is the same permission it already relies on for the signer
+set and the pause flag — so it can check a tenant's balance while validating and refuse when it is
+empty. The tenant funds their own balance, only their balance pays for their operations, and both
+facts are enforced by the chain rather than by our bookkeeping.
+
+| | Paymaster per tenant | Balances inside one paymaster |
+| --- | --- | --- |
+| Stake | 1 ETH × tenants × chains | 1 ETH × chains |
+| Deploy cost | Per tenant, per chain | Once per chain |
+| Funds isolated on chain | Yes | Yes |
+| Blast radius of a pause | One tenant | All tenants |
+| Bundler reputation | Per tenant, starts cold | Shared, established |
+| Monitoring cardinality | Tenants × chains | Chains |
+
+**Recommendation: balances inside one paymaster, with a dedicated paymaster available as an
+opt-in** for a tenant large enough to want their own reputation and pause switch and to fund their
+own stake. That is the same factory, used for the exception rather than the default.
+
+**The implementation cost to be aware of either way:** the paymaster currently returns an empty
+context, so the EntryPoint never calls `postOp` at all — deliberately, because a verifying paymaster
+has nothing to settle after execution. Debiting a balance on chain means reserving `maxCost` during
+validation and refunding the difference in `postOp`, which brings that call back and adds gas to
+every sponsored operation. That is the price of the chain enforcing the accounting instead of us.
 
 ---
 
