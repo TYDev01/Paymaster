@@ -21,8 +21,10 @@ import {
   createKeySchema,
   listAuditSchema,
   listSponsorshipsSchema,
+  recordPaymentSchema,
   upsertPolicySchema,
   type CreateKeyRequest,
+  type RecordPaymentRequestDto,
   type UpsertPolicyRequest,
 } from "./admin.dto.js";
 import type {ActorContext, AdminService} from "./admin.service.js";
@@ -136,6 +138,32 @@ export class AdminController {
   @RequirePermissions("key:read")
   async listFunding(@CurrentPrincipal() principal: Principal, @Ip() clientIp: string) {
     return {funding: await this.service.listFunding(actorContext(principal, clientIp))};
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // billing
+  // ------------------------------------------------------------------------------------------
+
+  /**
+   * Gated on `key:read`, the same account-self-service authority as the funding view, and
+   * deliberately NOT on anything a lapsed subscription could take away. A customer who cannot see
+   * what they owe cannot pay it.
+   */
+  @Get("subscription")
+  @RequirePermissions("key:read")
+  async getSubscription(@CurrentPrincipal() principal: Principal, @Ip() clientIp: string) {
+    return this.service.getSubscription(actorContext(principal, clientIp));
+  }
+
+  /** Platform-only. See `AdminService.recordSubscriptionPayment` for why this one write widens. */
+  @Post("subscriptions/payments")
+  @RequirePermissions("billing:write")
+  async recordSubscriptionPayment(
+    @Body(new ZodValidationPipe(recordPaymentSchema)) request: RecordPaymentRequestDto,
+    @CurrentPrincipal() principal: Principal,
+    @Ip() clientIp: string,
+  ) {
+    return this.service.recordSubscriptionPayment(request, actorContext(principal, clientIp));
   }
 
   // ------------------------------------------------------------------------------------------

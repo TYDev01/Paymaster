@@ -22,6 +22,18 @@ export const PERMISSIONS = [
    * special case in a controller, so "who can see everything" is answerable by grepping for it.
    */
   "platform:read",
+  /**
+   * Record a subscription payment for any tenant.
+   *
+   * Separate from `platform:read` and held only by `platform`, because it is a WRITE that reaches
+   * across the tenant boundary — the one exception to "writes never widen". It has to be: billing
+   * is something the platform does TO an account, and a customer who could extend their own
+   * subscription would not need to pay for one.
+   *
+   * It grants nothing else. A key with only this permission can move a paid-through date and read
+   * nothing at all.
+   */
+  "billing:write",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -79,6 +91,7 @@ export const ROLES = {
     "key:write",
     "metrics:read",
     "platform:read",
+    "billing:write",
   ],
 } as const satisfies Record<string, readonly Permission[]>;
 

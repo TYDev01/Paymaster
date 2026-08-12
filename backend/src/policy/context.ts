@@ -81,6 +81,9 @@ export const POLICY_DENIAL_CODES = [
   // Distinct from SPEND_CAP_EXCEEDED: that is a policy we chose, this is the customer's own money
   // running out. The first is fixed by editing a rule, the second only by funding the balance.
   "TENANT_BALANCE_INSUFFICIENT",
+  // The platform subscription has lapsed. Distinct again from TENANT_BALANCE_INSUFFICIENT: that is
+  // gas the customer funds, this is what they pay us. A tenant can easily be in one and not the other.
+  "SUBSCRIPTION_LAPSED",
   "RULE_ERROR",
 ] as const;
 

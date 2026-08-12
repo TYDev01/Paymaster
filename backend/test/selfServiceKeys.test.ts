@@ -18,6 +18,7 @@ import {migrate} from "../src/db/migrate.js";
 import {PostgresApiKeyStore} from "../src/db/postgresApiKeyStore.js";
 import {PostgresPolicyRepository} from "../src/db/postgresPolicyRepository.js";
 import {AuditLogRepository} from "../src/db/auditLogRepository.js";
+import {SubscriptionRepository} from "../src/db/subscriptionRepository.js";
 import {TenantRepository} from "../src/db/tenantRepository.js";
 import {tenantId} from "../src/db/scope.js";
 import {PolicyFactory} from "../src/policy/policyFactory.js";
@@ -122,6 +123,7 @@ describe("self-service key issuance", () => {
       apiKeys: new PostgresApiKeyStore(pg.pool),
       policyRepository: new PostgresPolicyRepository(pg.pool, new PolicyFactory(new InMemoryQuotaStore())),
       audit: new AuditLogRepository(pg.pool),
+      subscriptions: new SubscriptionRepository(pg.pool),
       quotasAreLocal: true,
       jwt,
       tenantSessions: sessions,
@@ -143,6 +145,8 @@ describe("self-service key issuance", () => {
 
   beforeEach(async () => {
     subject = ALICE;
+    await pg.pool.query("DELETE FROM subscription_payments");
+    await pg.pool.query("DELETE FROM tenant_subscriptions");
     await pg.pool.query("DELETE FROM audit_logs");
     await pg.pool.query("DELETE FROM api_keys");
     await pg.pool.query("DELETE FROM tenant_members");
@@ -417,6 +421,110 @@ describe("self-service key issuance", () => {
       // "fund your account" is how money lands in the wrong balance.
       expect(funding[0]!.tenantKey).toBe(onChainTenantKey(tenantId("default")));
       expect(funding[0]!.tenantKey).not.toBe(onChainTenantKey(tenantId("t_acme")));
+    });
+  });
+
+  describe("billing", () => {
+    /** Seeds a platform key. `billing:write` is only reachable this way, never through the API. */
+    async function platformBillingKey(): Promise<string> {
+      const secret = `pm_test_${"b".repeat(44)}`;
+      await pg.pool.query(
+        `INSERT INTO api_keys (tenant_id, id, name, key_hash, display_prefix, roles)
+         VALUES ('default', 'platform-billing', 'operator', $1, 'pm_test_bbbb', ARRAY['platform'])`,
+        [hashApiKey(secret)],
+      );
+      return secret;
+    }
+
+    it("reports no subscription rather than inventing one", async () => {
+      await tenants.createWithOwner({id: tenantId("t_acme"), name: "Acme", subject: ALICE});
+      const token = await signIn(ALICE, "t_acme");
+
+      const response = await get("/admin/subscription", token);
+      expect(response.statusCode, response.body).toBe(200);
+      const body = JSON.parse(response.body) as {status: {state: string}; payments: unknown[]};
+      expect(body.status.state).toBe("none");
+      expect(body.payments).toEqual([]);
+    });
+
+    it("refuses a customer trying to extend their own subscription", async () => {
+      await tenants.createWithOwner({id: tenantId("t_acme"), name: "Acme", subject: ALICE});
+      const token = await signIn(ALICE, "t_acme");
+
+      // The one write that crosses the tenant boundary, and therefore the one a customer must not
+      // reach. A tenant who could extend their own subscription would not need to buy one.
+      const response = await post("/admin/subscriptions/payments", token, {
+        tenantId: "t_acme",
+        plan: "growth",
+        periodSeconds: 2_592_000,
+      });
+      expect(response.statusCode).toBe(403);
+    });
+
+    it("lets the platform record a payment for a customer", async () => {
+      await tenants.createWithOwner({id: tenantId("t_acme"), name: "Acme", subject: ALICE});
+      const secret = await platformBillingKey();
+
+      const response = await post("/admin/subscriptions/payments", secret, {
+        tenantId: "t_acme",
+        plan: "growth",
+        periodSeconds: 2_592_000,
+        amountWei: "50000000000000000",
+        chainId: 8453,
+        txHash: `0x${"a1".repeat(32)}`,
+      });
+      expect(response.statusCode, response.body).toBe(201);
+
+      // And the customer sees it on their own page, recorded against THEIR tenant.
+      const view = JSON.parse((await get("/admin/subscription", await signIn(ALICE, "t_acme"))).body) as {
+        status: {state: string; plan: string};
+        payments: {amountWei: string}[];
+      };
+      expect(view.status.state).toBe("active");
+      expect(view.status.plan).toBe("growth");
+      expect(view.payments[0]!.amountWei).toBe("50000000000000000");
+    });
+
+    it("keeps a LAPSED customer able to sign in and see what they owe", async () => {
+      // The property the whole design exists for. Migration 0004 described an unpaid subscription
+      // as reaching `status = 'suspended'`, and `issue` refuses a session for a suspended tenant —
+      // so building it that way would lock a customer out of the page where they would pay.
+      await tenants.createWithOwner({id: tenantId("t_lapsed"), name: "Lapsed Co", subject: ALICE});
+      await new SubscriptionRepository(pg.pool).recordPayment({
+        tenantId: tenantId("t_lapsed"),
+        plan: "growth",
+        periodSeconds: 60,
+        recordedBy: "test",
+        // Long expired, grace included.
+        now: Math.floor(Date.now() / 1000) - 400 * 86_400,
+      });
+
+      const token = await signIn(ALICE, "t_lapsed");
+      const response = await get("/admin/subscription", token);
+
+      expect(response.statusCode, "a lapsed customer must still be able to sign in").toBe(200);
+      const body = JSON.parse(response.body) as {status: {state: string; allowsSponsorship: boolean}};
+      expect(body.status.state).toBe("lapsed");
+      expect(body.status.allowsSponsorship).toBe(false);
+
+      // Their keys and funding page stay readable too, for the same reason.
+      expect((await get("/admin/keys", token)).statusCode).toBe(200);
+      expect((await get("/admin/funding", token)).statusCode).toBe(200);
+    });
+
+    it("refuses a malformed transaction hash rather than storing it", async () => {
+      await tenants.createWithOwner({id: tenantId("t_acme"), name: "Acme", subject: ALICE});
+      const secret = await platformBillingKey();
+
+      const response = await post("/admin/subscriptions/payments", secret, {
+        tenantId: "t_acme",
+        plan: "growth",
+        periodSeconds: 2_592_000,
+        chainId: 8453,
+        txHash: "not-a-hash",
+      });
+      // A hash that cannot be checked against the chain is worse than no hash: it looks like proof.
+      expect(response.statusCode).toBe(400);
     });
   });
 });

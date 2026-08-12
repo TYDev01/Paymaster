@@ -5,7 +5,9 @@ import type {SponsorRequest} from "../src/api/dto/sponsorRequest.js";
 import {SponsorService} from "../src/api/sponsor/sponsor.service.js";
 import {CANONICAL_ENTRYPOINT_V07} from "../src/chain/chainConfig.js";
 import {ChainRegistry} from "../src/chain/chainRegistry.js";
+import {SubscriptionService} from "../src/billing/subscription.js";
 import {TenantBalanceReader} from "../src/chain/tenantBalance.js";
+import type {SubscriptionRepository} from "../src/db/subscriptionRepository.js";
 import {tenantId} from "../src/db/scope.js";
 import {PolicyEngine} from "../src/policy/engine.js";
 import {PolicySource} from "../src/policy/policySource.js";
@@ -218,7 +220,17 @@ describe("SponsorService on a multi-tenant chain", () => {
   /** maxCost for the request above: (500k + 200k + 300k + 50k + 100k) * 20 gwei. */
   const MAX_COST = 1_150_000n * 20_000_000_000n;
 
-  async function buildService(tenantBalances?: TenantBalanceReader) {
+  function subscriptionsAllowing(allows: boolean): SubscriptionService {
+    const repository = {
+      get: async () =>
+        allows ? {tenantId: ACME_TENANT, plan: "growth", paidThrough: 2_000_000_000, graceSeconds: 0} : undefined,
+    } as unknown as SubscriptionRepository;
+    // `unsubscribedAllows: false` turns "no row" into a refusal, which is how a deployment that
+    // sells subscriptions is configured.
+    return new SubscriptionService(repository, {now: () => 1_700_000_000, unsubscribedAllows: allows, ttlMs: 0});
+  }
+
+  async function buildService(tenantBalances?: TenantBalanceReader, subscriptions?: SubscriptionService) {
     const source = new PolicySource({load: async () => [{tenantId: ACME_TENANT, id: "default", rules: []}]});
     await source.reload();
 
@@ -242,6 +254,7 @@ describe("SponsorService on a multi-tenant chain", () => {
       policyEngine: new PolicyEngine(),
       signatureEngine: new SignatureEngine(new LocalSponsorshipSigner(SIGNER_KEY)),
       ...(tenantBalances === undefined ? {} : {tenantBalances}),
+      ...(subscriptions === undefined ? {} : {subscriptions}),
       options: {
         validitySeconds: 300,
         paymasterVerificationGasLimit: 300_000n,
@@ -290,6 +303,21 @@ describe("SponsorService on a multi-tenant chain", () => {
 
   it("signs anyway when no balance reader is configured", async () => {
     const service = await buildService(undefined);
+    await expect(service.sponsor(request(), {tenantId: ACME_TENANT})).resolves.toMatchObject({paymaster: PAYMASTER});
+  });
+
+  it("refuses with SUBSCRIPTION_LAPSED before it even looks at the balance", async () => {
+    // Checked first because it is the cheapest question and the one that changes least often.
+    // A funded balance does not buy platform access: they are different debts.
+    const service = await buildService(readerReturning(MAX_COST * 10n), subscriptionsAllowing(false));
+
+    await expect(service.sponsor(request(), {tenantId: ACME_TENANT})).rejects.toMatchObject({
+      denial: {code: "SUBSCRIPTION_LAPSED"},
+    });
+  });
+
+  it("sponsors when the subscription is current", async () => {
+    const service = await buildService(readerReturning(MAX_COST), subscriptionsAllowing(true));
     await expect(service.sponsor(request(), {tenantId: ACME_TENANT})).resolves.toMatchObject({paymaster: PAYMASTER});
   });
 
