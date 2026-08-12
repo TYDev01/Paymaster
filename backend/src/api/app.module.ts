@@ -11,6 +11,7 @@ import {PostgresApiKeyStore} from "../db/postgresApiKeyStore.js";
 import {PostgresPolicyRepository} from "../db/postgresPolicyRepository.js";
 import {SponsorshipRepository} from "../db/sponsorshipRepository.js";
 import {AuditLogRepository} from "../db/auditLogRepository.js";
+import {SubscriptionRepository} from "../db/subscriptionRepository.js";
 import {PolicyFactory} from "../policy/policyFactory.js";
 import {AdminController, ADMIN_SERVICE} from "./admin/admin.controller.js";
 import {AdminService} from "./admin/admin.service.js";
@@ -19,6 +20,7 @@ import type {ApiKeyStore} from "../auth/apiKeyStore.js";
 import {InMemoryApiKeyStore} from "../auth/inMemoryApiKeyStore.js";
 import {JwtService} from "../auth/jwt.js";
 import {ChainRegistry} from "../chain/chainRegistry.js";
+import {SubscriptionService} from "../billing/subscription.js";
 import {TenantBalanceReader} from "../chain/tenantBalance.js";
 import {ChainRegistryTokenBalanceReader} from "../chain/tokenBalanceReader.js";
 import {CompositeAlerter, LoggingAlerter, type Alerter} from "../monitoring/alerting.js";
@@ -81,6 +83,8 @@ export interface AppDependencies {
    * drive the funding view and the pre-sign check without an RPC endpoint behind them.
    */
   readonly tenantBalances?: TenantBalanceReader | undefined;
+  /** Subscriptions. Absent without a database, where every request proceeds unbilled. */
+  readonly subscriptions?: SubscriptionRepository | undefined;
   /**
    * Long-running loops (funding monitor, spend reconciler) to run alongside the HTTP app. Empty in
    * tests, which build the graph directly and do not want timers; populated by `buildDependencies`.
@@ -119,9 +123,16 @@ export class AppModule {
     // actually runs a multi-tenant paymaster asks it something.
     const tenantBalances = deps.tenantBalances ?? new TenantBalanceReader(deps.chains);
 
+    // `unsubscribedAllows` stays at its default of true: every tenant that predates the
+    // subscriptions table has no row, and flipping this would take a working deployment offline on
+    // upgrade. A deployment that sells subscriptions turns it off once its customers have rows.
+    const subscriptionState =
+      deps.subscriptions === undefined ? undefined : new SubscriptionService(deps.subscriptions);
+
     const sponsorService = new SponsorService({
       chains: deps.chains,
       tenantBalances,
+      subscriptions: subscriptionState,
       policies: deps.policies,
       // The metrics facade doubles as the policy observer, so denials and latency are captured here.
       policyEngine: new PolicyEngine(metrics === undefined ? {} : {observer: metrics}),
@@ -148,6 +159,8 @@ export class AppModule {
       broadcast: deps.policyBroadcast,
       chains: deps.chains,
       tenantBalances,
+      subscriptions: deps.subscriptions,
+      subscriptionState,
     });
 
     const providers: Provider[] = [
@@ -359,6 +372,7 @@ export async function buildDependencies(
     sponsorships: pool === undefined ? undefined : new SponsorshipRepository(pool),
     policyRepository,
     audit: pool === undefined ? undefined : new AuditLogRepository(pool),
+    subscriptions: pool === undefined ? undefined : new SubscriptionRepository(pool),
     pool,
     redis,
     quotasAreLocal: redis === undefined,

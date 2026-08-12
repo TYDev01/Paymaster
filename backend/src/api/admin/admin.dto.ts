@@ -37,6 +37,32 @@ export const createKeySchema = z.object({
 
 export type CreateKeyRequest = z.infer<typeof createKeySchema>;
 
+/**
+ * A recorded subscription payment.
+ *
+ * `periodSeconds` rather than an end date: the repository extends from `max(now, paidThrough)`, so
+ * the caller says how much time was bought and never has to compute where it lands. A caller
+ * supplying an absolute end date would silently truncate the remaining period of anyone paying
+ * early.
+ */
+export const recordPaymentSchema = z.object({
+  tenantId: z.string().min(1).max(64),
+  plan: z.string().min(1).max(64),
+  // At least a minute, at most two years. The upper bound is not bureaucracy: `periodSeconds` is
+  // added to a unix timestamp, and an unbounded value from a fat-fingered request would push
+  // paid_through past any date a human would notice was wrong.
+  periodSeconds: z.number().int().min(60).max(63_072_000),
+  amountWei: z.string().regex(/^\d+$/, "amountWei must be a decimal wei string").optional(),
+  chainId: z.number().int().positive().optional(),
+  txHash: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{64}$/, "txHash must be a 32-byte hex hash")
+    .optional(),
+  note: z.string().max(500).optional(),
+});
+
+export type RecordPaymentRequestDto = z.infer<typeof recordPaymentSchema>;
+
 export const listSponsorshipsSchema = z.object({
   apiKeyId: z.string().max(128).optional(),
   chainId: z.coerce.number().int().positive().optional(),

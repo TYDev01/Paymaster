@@ -3,6 +3,7 @@ import {slice, toHex, type Address, type Hex} from "viem";
 import {calculateMaxCost} from "../../chain/gas.js";
 import type {ChainRegistry} from "../../chain/chainRegistry.js";
 import type {TenantBalanceReader} from "../../chain/tenantBalance.js";
+import type {SubscriptionService} from "../../billing/subscription.js";
 import {noopTracer, withSpan, type Span, type Tracer} from "../../monitoring/tracing.js";
 import type {TenantId} from "../../db/scope.js";
 import {decodeCallTargets} from "../../policy/callData.js";
@@ -75,6 +76,11 @@ export interface SponsorServiceDeps {
    * absent the contract still refuses the operation — see the note at the call site.
    */
   readonly tenantBalances?: TenantBalanceReader | undefined;
+  /**
+   * Decides whether the tenant's platform subscription still permits sponsorship. Optional: absent
+   * on a deployment that does not sell subscriptions, where every request proceeds.
+   */
+  readonly subscriptions?: SubscriptionService | undefined;
   readonly options: SponsorServiceOptions;
   /** Injected so evaluation is deterministic and testable. Unix seconds. */
   readonly now?: () => number;
@@ -162,6 +168,31 @@ export class SponsorService {
       paymasterVerificationGasLimit: options.paymasterVerificationGasLimit,
       postOpGasLimit: options.postOpGasLimit,
     });
+
+    /**
+     * The subscription is checked before the balance, and both before policy, because this is the
+     * cheapest question and the one whose answer changes least often.
+     *
+     * A LAPSED subscription stops sponsorship and nothing else — the customer can still sign in,
+     * read their balance, see what they owe and pay. Modelling this as `tenants.status =
+     * 'suspended'` would have locked them out of the dashboard they need in order to fix it.
+     */
+    const subscription = await this.#deps.subscriptions?.statusOf(caller.tenantId);
+    if (subscription !== undefined && !subscription.allowsSponsorship) {
+      this.#deps.metrics?.recordSponsorship(request.chainId, "denied");
+      span.setAttribute("paymaster.outcome", "denied");
+      span.setAttribute("paymaster.denial_code", "SUBSCRIPTION_LAPSED");
+      throw new SponsorshipDeniedError(
+        deny(
+          "subscription",
+          "SUBSCRIPTION_LAPSED",
+          subscription.graceEndsAt === undefined
+            ? "no active subscription"
+            : `subscription lapsed at ${new Date(subscription.graceEndsAt * 1000).toISOString()}`,
+        ),
+        policyId,
+      );
+    }
 
     /**
      * Checked BEFORE the policy is evaluated, so there is no reservation to unwind when it fails

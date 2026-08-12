@@ -12,7 +12,9 @@ import type {AuditLogRepository} from "../../db/auditLogRepository.js";
 import type {PolicyDefinition, PostgresPolicyRepository, StoredPolicy} from "../../db/postgresPolicyRepository.js";
 import type {SponsorshipRepository, StoredSponsorship} from "../../db/sponsorshipRepository.js";
 import type {PolicyBroadcast} from "../../policy/policyBroadcast.js";
-import {writingTenant, type Scope, type TenantScope} from "../../db/scope.js";
+import {tenantId, writingTenant, type Scope, type TenantScope} from "../../db/scope.js";
+import type {Subscription, SubscriptionPayment, SubscriptionRepository} from "../../db/subscriptionRepository.js";
+import type {SubscriptionService, SubscriptionStatus} from "../../billing/subscription.js";
 import type {PolicySource} from "../../policy/policySource.js";
 import type {ApiKeyView, CreateKeyRequest, CreatedApiKeyView, UpsertPolicyRequest} from "./admin.dto.js";
 
@@ -74,6 +76,10 @@ export interface AdminDeps {
   readonly chains?: ChainRegistry | undefined;
   /** Reads on-chain tenant balances. Absent means the funding view reports balances as unknown. */
   readonly tenantBalances?: TenantBalanceReader | undefined;
+  /** Subscription state and payment history. Absent on a deployment that does not sell them. */
+  readonly subscriptions?: SubscriptionRepository | undefined;
+  /** Cache in front of the above; invalidated when a payment lands so paying restores service now. */
+  readonly subscriptionState?: SubscriptionService | undefined;
 }
 
 /**
@@ -359,6 +365,79 @@ export class AdminService {
     }
 
     return funding;
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // billing
+  // ------------------------------------------------------------------------------------------
+
+  /**
+   * This tenant's subscription and what it has paid.
+   *
+   * Own-tenant only, like funding: a platform operator asking "what does this customer owe" is a
+   * different question with a different answer shape, and conflating them would mean an operator
+   * looking at their own console saw a customer's billing history under "your subscription".
+   *
+   * Readable at every state INCLUDING lapsed — that is the point. A customer whose subscription has
+   * lapsed needs this page more than anyone, and gating it behind an active subscription is how a
+   * billing system traps the customers who want to pay.
+   */
+  async getSubscription(context: ActorContext): Promise<{
+    status: SubscriptionStatus;
+    payments: readonly SubscriptionPayment[];
+  }> {
+    const repo = this.deps.subscriptions;
+    const state = this.deps.subscriptionState;
+    if (repo === undefined || state === undefined) throw new AdminUnavailableError();
+
+    const tenant = writingTenant(context.writeScope, "read subscription");
+    return {status: await state.statusOf(tenant), payments: await repo.payments(tenant)};
+  }
+
+  /**
+   * Records a payment against any tenant, extending their subscription.
+   *
+   * The one write that crosses the tenant boundary, gated on `billing:write`, which only the
+   * platform role holds. The permission is checked HERE rather than only at the route, because the
+   * scope widening happens here: `context.writeScope` is the caller's own tenant, and this method
+   * deliberately ignores it in favour of the tenant named in the request.
+   */
+  async recordSubscriptionPayment(
+    request: {
+      tenantId: string;
+      plan: string;
+      periodSeconds: number;
+      amountWei?: string | undefined;
+      chainId?: number | undefined;
+      txHash?: string | undefined;
+      note?: string | undefined;
+    },
+    context: ActorContext,
+    now: number = Math.floor(Date.now() / 1000),
+  ): Promise<{subscription: Subscription; payment: SubscriptionPayment}> {
+    const repo = this.deps.subscriptions;
+    if (repo === undefined) throw new AdminUnavailableError();
+    if (!context.permissions.has("billing:write")) {
+      throw new RoleEscalationError(["billing:write"]);
+    }
+
+    const target = tenantId(request.tenantId);
+    const result = await repo.recordPayment({
+      tenantId: target,
+      plan: request.plan,
+      periodSeconds: request.periodSeconds,
+      recordedBy: context.actor,
+      now,
+      ...(request.amountWei === undefined ? {} : {amountWei: request.amountWei}),
+      ...(request.chainId === undefined ? {} : {chainId: request.chainId}),
+      ...(request.txHash === undefined ? {} : {txHash: request.txHash}),
+      ...(request.note === undefined ? {} : {note: request.note}),
+    });
+
+    // Without this, a customer who has just paid keeps getting refused for the rest of the TTL.
+    // Being slow to notice a payment is the one direction of staleness that is unacceptable.
+    this.deps.subscriptionState?.invalidate(target);
+    return result;
   }
 
   async listAudit(query: {actor?: string; action?: string; since?: number; limit?: number}, context: ActorContext) {

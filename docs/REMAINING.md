@@ -196,7 +196,7 @@ In dependency order — each item needs the ones above it.
    - **a funding UI.** The data is served; nothing renders it or connects a wallet to `depositFor`.
    - **`setController` is owner-only**, so self-service withdrawal needs an admin path.
    - **reconciling** the `sponsorships` table against on-chain balances.
-   - **subscriptions**: prepaid periods, a grace window, and suspension on lapse.
+   - **subscriptions**: ✅ built — see item 6.
 
    The paragraph below is kept as written because it describes the shape the rest of this still has
    to grow. One line of it is now wrong and worth flagging rather than quietly editing: it concluded
@@ -217,9 +217,31 @@ In dependency order — each item needs the ones above it.
      the same two-phase shape the spend caps already use;
    - a tenant at zero must be refused **fail-closed**, because past zero the operator is paying;
    - the ledger must reconcile against the on-chain deposit, or slow drift becomes unexplained loss.
-6. **Billing.** Usage metering, a pricing model (gas at cost plus margin, or a subscription), an
-   invoice, and a payment rail. Also the operational question of what happens when a card fails
-   while operations are in flight.
+6. **Billing.** ⚠️ The subscription is built; the payment RAIL is not.
+
+   Migration `0005_subscriptions.sql` adds prepaid periods with a grace window, and a
+   `subscription_payments` row for every extension — so `paid_through` can never move without a
+   record of what moved it. A unique index on `(chain_id, tx_hash)` means one on-chain transfer
+   buys one period however many times it is submitted. `GET /admin/subscription` shows a customer
+   their state and history; `POST /admin/subscriptions/payments` records a payment and is gated on
+   `billing:write`, held only by `platform` — the single write in the system that crosses the
+   tenant boundary, because billing is something the platform does TO an account.
+
+   **Lapsing does not suspend the tenant, and that is the important part.** Migration 0004
+   described `tenants.status = 'suspended'` as "what an unpaid subscription reaches"; building it
+   that way would have been a serious mistake, because `TenantSessionService.issue` refuses a
+   session for a suspended tenant — so a customer who fell behind would be locked out of the very
+   dashboard where they would go to pay. The two are now distinct: suspension is an operator action
+   for abuse and stops everything; a lapsed subscription stops sponsorship only, and the customer
+   keeps their session, their keys, their funding page and their invoice history. State is DERIVED
+   from `paid_through` and the clock rather than stored, so no missed sweep can grant or withhold
+   service that was not bought.
+
+   Still missing, and the reason this is not ✅:
+   - **payment detection.** Someone has to notice an incoming transfer and call the record
+     endpoint. Today that is a manual platform action.
+   - **a plan catalogue.** `plan` is free text; nothing maps a plan to a quota tier or chain access.
+   - **notice before lapsing.** Nothing warns a customer that their period is ending.
 7. **Tenant-scoped policy.** Today a policy is global and edited by the operator. A tenant needs to
    edit its own policy, bounded by platform limits it cannot raise — nested limits, not a flat set.
 8. **The frontend for all of it.** Signup, org management, keys, funding, usage, invoices. The

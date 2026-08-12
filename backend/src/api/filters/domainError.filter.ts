@@ -48,7 +48,8 @@ export class DomainErrorFilter implements ExceptionFilter {
       const quota = exception.denial.code === "QUOTA_EXCEEDED" || exception.denial.code === "SPEND_CAP_EXCEEDED";
       // 402 is the honest code for an empty balance, and the useful one: it tells a caller to add
       // funds rather than to retry (429) or to change what they are asking for (403).
-      const unfunded = exception.denial.code === "TENANT_BALANCE_INSUFFICIENT";
+      const unfunded =
+        exception.denial.code === "TENANT_BALANCE_INSUFFICIENT" || exception.denial.code === "SUBSCRIPTION_LAPSED";
       return {
         // 429 for quota so clients back off; 403 for a policy that will never allow this request.
         status: unfunded ? HttpStatus.PAYMENT_REQUIRED : quota ? HttpStatus.TOO_MANY_REQUESTS : HttpStatus.FORBIDDEN,
