@@ -9,6 +9,7 @@ import {loadMigrations, migrate} from "../src/db/migrate.js";
 import {PostgresApiKeyStore} from "../src/db/postgresApiKeyStore.js";
 import {SponsorshipRepository} from "../src/db/sponsorshipRepository.js";
 import {startPostgres, truncateAll, type TestPostgres} from "./support/postgres.js";
+import {ACME, ACME_SCOPE} from "./support/tenants.js";
 
 const NOW = 1_700_000_000;
 const SENDER = "0x1234567890123456789012345678901234567890" as Address;
@@ -40,7 +41,7 @@ describe("database", () => {
     it("refuses a key pinned to a policy that does not exist", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record} = keyRecord({policyId: "ghost"});
-      await expect(store.create(record)).rejects.toThrow(/foreign key constraint/);
+      await expect(store.create(ACME_SCOPE, record)).rejects.toThrow(/foreign key constraint/);
     });
 
     /**
@@ -48,9 +49,9 @@ describe("database", () => {
      * silently unpinning keys on delete would hand every one of them a free upgrade.
      */
     it("refuses to delete a policy a key is pinned to", async () => {
-      await pg.pool.query("INSERT INTO policies (id, name) VALUES ('pinned', 'pinned')");
+      await pg.pool.query("INSERT INTO policies (tenant_id, id, name) VALUES ('default', 'pinned', 'pinned')");
       const store = new PostgresApiKeyStore(pg.pool);
-      await store.create(keyRecord({policyId: "pinned"}).record);
+      await store.create(ACME_SCOPE, keyRecord({policyId: "pinned"}).record);
 
       await expect(pg.pool.query("DELETE FROM policies WHERE id = 'pinned'")).rejects.toThrow(/foreign key constraint/);
     });
@@ -61,6 +62,7 @@ describe("database", () => {
     return {
       secret: generated.secret,
       record: {
+        tenantId: ACME,
         id: "k1",
         name: "test key",
         hash: generated.hash,
@@ -141,7 +143,7 @@ describe("database", () => {
     it("stores wei amounts beyond BIGINT range", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record} = keyRecord();
-      await store.create(record);
+      await store.create(ACME_SCOPE, record);
 
       const repo = new SponsorshipRepository(pg.pool);
       // 1000 ETH in wei — over 100x what BIGINT can hold.
@@ -149,6 +151,7 @@ describe("database", () => {
       expect(huge).toBeGreaterThan(2n ** 63n - 1n);
 
       await repo.record({
+        tenantId: ACME,
         chainId: 8453,
         sender: SENDER,
         nonce: 0n,
@@ -169,12 +172,13 @@ describe("database", () => {
     it("stores a uint256 nonce without precision loss", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record} = keyRecord();
-      await store.create(record);
+      await store.create(ACME_SCOPE, record);
 
       const repo = new SponsorshipRepository(pg.pool);
       // A 2D-nonce key uses the high 192 bits, so large nonces are normal, not exotic.
       const nonce = 2n ** 200n + 12_345n;
       await repo.record({
+        tenantId: ACME,
         chainId: 8453,
         sender: SENDER,
         nonce,
@@ -195,12 +199,12 @@ describe("database", () => {
     it("rejects a malformed address at the database boundary", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record} = keyRecord();
-      await store.create(record);
+      await store.create(ACME_SCOPE, record);
 
       await expect(
         pg.pool.query(
-          `INSERT INTO sponsorships (chain_id, sender, nonce, paymaster, entry_point, api_key_id, policy_id, signer, max_cost_wei, valid_after, valid_until)
-           VALUES (1, 'not-an-address', 0, $1, $2, $3, 'p', $4, 1, now(), now() + interval '1 hour')`,
+          `INSERT INTO sponsorships (tenant_id, chain_id, sender, nonce, paymaster, entry_point, api_key_id, policy_id, signer, max_cost_wei, valid_after, valid_until)
+           VALUES ('default', 1, 'not-an-address', 0, $1, $2, $3, 'p', $4, 1, now(), now() + interval '1 hour')`,
           [PAYMASTER, ENTRY_POINT, record.id, SIGNER],
         ),
       ).rejects.toThrow(/sender_check|violates check constraint/);
@@ -209,12 +213,12 @@ describe("database", () => {
     it("rejects an uppercase address, which would break equality", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record} = keyRecord();
-      await store.create(record);
+      await store.create(ACME_SCOPE, record);
 
       await expect(
         pg.pool.query(
-          `INSERT INTO sponsorships (chain_id, sender, nonce, paymaster, entry_point, api_key_id, policy_id, signer, max_cost_wei, valid_after, valid_until)
-           VALUES (1, $1, 0, $2, $3, $4, 'p', $5, 1, now(), now() + interval '1 hour')`,
+          `INSERT INTO sponsorships (tenant_id, chain_id, sender, nonce, paymaster, entry_point, api_key_id, policy_id, signer, max_cost_wei, valid_after, valid_until)
+           VALUES ('default', 1, $1, 0, $2, $3, $4, 'p', $5, 1, now(), now() + interval '1 hour')`,
           ["0xABCDEF1234567890ABCDEF1234567890ABCDEF12", PAYMASTER, ENTRY_POINT, record.id, SIGNER],
         ),
       ).rejects.toThrow(/violates check constraint/);
@@ -223,12 +227,12 @@ describe("database", () => {
     it("rejects an inverted validity window", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record} = keyRecord();
-      await store.create(record);
+      await store.create(ACME_SCOPE, record);
 
       await expect(
         pg.pool.query(
-          `INSERT INTO sponsorships (chain_id, sender, nonce, paymaster, entry_point, api_key_id, policy_id, signer, max_cost_wei, valid_after, valid_until)
-           VALUES (1, $1, 0, $2, $3, $4, 'p', $5, 1, now(), now() - interval '1 hour')`,
+          `INSERT INTO sponsorships (tenant_id, chain_id, sender, nonce, paymaster, entry_point, api_key_id, policy_id, signer, max_cost_wei, valid_after, valid_until)
+           VALUES ('default', 1, $1, 0, $2, $3, $4, 'p', $5, 1, now(), now() - interval '1 hour')`,
           [SENDER, PAYMASTER, ENTRY_POINT, record.id, SIGNER],
         ),
       ).rejects.toThrow(/sponsorships_window/);
@@ -238,9 +242,10 @@ describe("database", () => {
     it("refuses to delete a key that authorised sponsorships", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record} = keyRecord();
-      await store.create(record);
+      await store.create(ACME_SCOPE, record);
 
       await new SponsorshipRepository(pg.pool).record({
+        tenantId: ACME,
         chainId: 8453,
         sender: SENDER,
         nonce: 1n,
@@ -262,7 +267,7 @@ describe("database", () => {
     it("keeps enabled and revoked_at consistent", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record} = keyRecord();
-      await store.create(record);
+      await store.create(ACME_SCOPE, record);
       await expect(pg.pool.query("UPDATE api_keys SET enabled = false WHERE id = $1", [record.id])).rejects.toThrow(
         /api_keys_revoked_consistency/,
       );
@@ -273,9 +278,9 @@ describe("database", () => {
     it("round-trips a key", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       // The policy must exist first: api_keys.policy_id is a foreign key as of 0002.
-      await pg.pool.query("INSERT INTO policies (id, name) VALUES ('restricted', 'restricted')");
+      await pg.pool.query("INSERT INTO policies (tenant_id, id, name) VALUES ('default', 'restricted', 'restricted')");
       const {record, secret} = keyRecord({policyId: "restricted", expiresAt: NOW + 3_600});
-      await store.create(record);
+      await store.create(ACME_SCOPE, record);
 
       const found = await store.findByHash(hashApiKey(secret));
       expect(found).toMatchObject({
@@ -295,17 +300,17 @@ describe("database", () => {
     it("enforces hash uniqueness", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record} = keyRecord();
-      await store.create(record);
-      await expect(store.create({...record, id: "k2"})).rejects.toThrow(/duplicate key|unique/i);
+      await store.create(ACME_SCOPE, record);
+      await expect(store.create(ACME_SCOPE, {...record, id: "k2"})).rejects.toThrow(/duplicate key|unique/i);
     });
 
     it("revokes idempotently", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record, secret} = keyRecord();
-      await store.create(record);
+      await store.create(ACME_SCOPE, record);
 
-      expect(await store.revoke("k1", NOW)).toBe(true);
-      expect(await store.revoke("k1", NOW), "a second revoke changes nothing").toBe(false);
+      expect(await store.revoke(ACME_SCOPE, "k1", NOW)).toBe(true);
+      expect(await store.revoke(ACME_SCOPE, "k1", NOW), "a second revoke changes nothing").toBe(false);
       expect((await store.findByHash(hashApiKey(secret)))!.enabled).toBe(false);
     });
 
@@ -313,18 +318,18 @@ describe("database", () => {
     it("keeps last_used_at monotonic", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record} = keyRecord();
-      await store.create(record);
+      await store.create(ACME_SCOPE, record);
 
       await store.touch("k1", NOW);
       await store.touch("k1", NOW - 500);
 
-      expect((await store.list())[0]!.lastUsedAt).toBe(NOW);
+      expect((await store.list(ACME_SCOPE))[0]!.lastUsedAt).toBe(NOW);
     });
 
     it("drops roles that no longer exist in code", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record, secret} = keyRecord();
-      await store.create(record);
+      await store.create(ACME_SCOPE, record);
       await pg.pool.query("UPDATE api_keys SET roles = ARRAY['sponsor','wizard'] WHERE id = $1", [record.id]);
 
       const found = await store.findByHash(hashApiKey(secret));
@@ -334,7 +339,7 @@ describe("database", () => {
     it("stores no recoverable credential", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record, secret} = keyRecord();
-      await store.create(record);
+      await store.create(ACME_SCOPE, record);
 
       const {rows} = await pg.pool.query("SELECT * FROM api_keys");
       expect(JSON.stringify(rows)).not.toContain(secret.slice(8));
@@ -344,7 +349,7 @@ describe("database", () => {
     it("authenticates through the real authenticator", async () => {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record, secret} = keyRecord();
-      await store.create(record);
+      await store.create(ACME_SCOPE, record);
 
       const auth = new ApiKeyAuthenticator(store);
       const result = await auth.authenticate(secret, NOW);
@@ -356,12 +361,13 @@ describe("database", () => {
     async function seedKey(id = "k1"): Promise<string> {
       const store = new PostgresApiKeyStore(pg.pool);
       const {record} = keyRecord({id});
-      await store.create(record);
+      await store.create(ACME_SCOPE, record);
       return id;
     }
 
     function sponsorship(over: Partial<Parameters<SponsorshipRepository["record"]>[0]> = {}) {
       return {
+        tenantId: ACME,
         chainId: 8453,
         sender: SENDER,
         nonce: 0n,
@@ -414,10 +420,10 @@ describe("database", () => {
       await repo.record(sponsorship({apiKeyId: "k1", chainId: 8453}));
       await repo.record(sponsorship({apiKeyId: "k2", chainId: 10, nonce: 1n}));
 
-      expect(await repo.list({apiKeyId: "k1"})).toHaveLength(1);
-      expect(await repo.list({chainId: 10})).toHaveLength(1);
-      expect(await repo.list({sender: SENDER})).toHaveLength(2);
-      expect(await repo.list()).toHaveLength(2);
+      expect(await repo.list(ACME_SCOPE, {apiKeyId: "k1"})).toHaveLength(1);
+      expect(await repo.list(ACME_SCOPE, {chainId: 10})).toHaveLength(1);
+      expect(await repo.list(ACME_SCOPE, {sender: SENDER})).toHaveLength(2);
+      expect(await repo.list(ACME_SCOPE)).toHaveLength(2);
     });
 
     /** An unbounded admin listing is a denial of service wearing a report's clothes. */
@@ -426,8 +432,8 @@ describe("database", () => {
       const repo = new SponsorshipRepository(pg.pool);
       for (let i = 0; i < 5; i++) await repo.record(sponsorship({nonce: BigInt(i)}));
 
-      expect(await repo.list({limit: 2})).toHaveLength(2);
-      expect(await repo.list({limit: 10_000})).toHaveLength(5);
+      expect(await repo.list(ACME_SCOPE, {limit: 2})).toHaveLength(2);
+      expect(await repo.list(ACME_SCOPE, {limit: 10_000})).toHaveLength(5);
     });
 
     it("sums committed wei beyond BIGINT range", async () => {
@@ -460,18 +466,18 @@ describe("database", () => {
 
       // Parameterised: this is data, not syntax. The table must survive.
       const hostile = "0x'; DROP TABLE sponsorships; --" as Address;
-      expect(await repo.list({sender: hostile})).toHaveLength(0);
-      expect(await repo.list()).toHaveLength(1);
+      expect(await repo.list(ACME_SCOPE, {sender: hostile})).toHaveLength(0);
+      expect(await repo.list(ACME_SCOPE)).toHaveLength(1);
     });
   });
 
   describe("AuditLogRepository", () => {
     it("records and lists entries newest first", async () => {
       const repo = new AuditLogRepository(pg.pool);
-      await repo.record({actor: "admin1", action: "policy.update", subject: "policy:default"});
-      await repo.record({actor: "admin1", action: "key.revoke", subject: "api_key:k1"});
+      await repo.record({tenantId: ACME, actor: "admin1", action: "policy.update", subject: "policy:default"});
+      await repo.record({tenantId: ACME, actor: "admin1", action: "key.revoke", subject: "api_key:k1"});
 
-      const entries = await repo.list();
+      const entries = await repo.list(ACME_SCOPE);
       expect(entries).toHaveLength(2);
       expect(entries[0]!.action).toBe("key.revoke");
     });
@@ -479,6 +485,7 @@ describe("database", () => {
     it("stores structured detail and client ip", async () => {
       const repo = new AuditLogRepository(pg.pool);
       await repo.record({
+        tenantId: ACME,
         actor: "admin1",
         action: "chain.disable",
         subject: "chain:8453",
@@ -486,7 +493,7 @@ describe("database", () => {
         clientIp: "203.0.113.7",
       });
 
-      const [entry] = await repo.list();
+      const [entry] = await repo.list(ACME_SCOPE);
       expect(entry!.detail).toEqual({reason: "deposit low", previous: true});
       expect(entry!.clientIp).toBe("203.0.113.7");
     });
@@ -498,6 +505,7 @@ describe("database", () => {
     it("redacts credentials before writing", async () => {
       const repo = new AuditLogRepository(pg.pool);
       await repo.record({
+        tenantId: ACME,
         actor: "admin1",
         action: "key.create",
         detail: {
@@ -521,6 +529,7 @@ describe("database", () => {
     it("redacts regardless of key casing or separators", async () => {
       const repo = new AuditLogRepository(pg.pool);
       await repo.record({
+        tenantId: ACME,
         actor: "a",
         action: "t",
         detail: {API_KEY: "s1", "private-key": "s2", Token: "s3", PASSWORD: "s4"},
@@ -533,7 +542,7 @@ describe("database", () => {
 
     it("redacts inside arrays", async () => {
       const repo = new AuditLogRepository(pg.pool);
-      await repo.record({actor: "a", action: "t", detail: {keys: [{secret: "hideme"}, {name: "ok"}]}});
+      await repo.record({tenantId: ACME, actor: "a", action: "t", detail: {keys: [{secret: "hideme"}, {name: "ok"}]}});
 
       const {rows} = await pg.pool.query<{detail: Record<string, unknown>}>("SELECT detail FROM audit_logs");
       expect(JSON.stringify(rows[0]!.detail)).not.toContain("hideme");
@@ -544,24 +553,24 @@ describe("database", () => {
       let deep: Record<string, unknown> = {secret: "hideme"};
       for (let i = 0; i < 50; i++) deep = {nested: deep};
 
-      await expect(repo.record({actor: "a", action: "t", detail: deep})).resolves.toBeGreaterThan(0n);
+      await expect(repo.record({tenantId: ACME, actor: "a", action: "t", detail: deep})).resolves.toBeGreaterThan(0n);
       const {rows} = await pg.pool.query<{detail: Record<string, unknown>}>("SELECT detail FROM audit_logs");
       expect(JSON.stringify(rows[0]!.detail)).not.toContain("hideme");
     });
 
     it("filters by actor, action, and time", async () => {
       const repo = new AuditLogRepository(pg.pool);
-      await repo.record({actor: "admin1", action: "policy.update"});
-      await repo.record({actor: "admin2", action: "key.revoke"});
+      await repo.record({tenantId: ACME, actor: "admin1", action: "policy.update"});
+      await repo.record({tenantId: ACME, actor: "admin2", action: "key.revoke"});
 
-      expect(await repo.list({actor: "admin1"})).toHaveLength(1);
-      expect(await repo.list({action: "key.revoke"})).toHaveLength(1);
-      expect(await repo.list({since: Math.floor(Date.now() / 1000) + 60})).toHaveLength(0);
+      expect(await repo.list(ACME_SCOPE, {actor: "admin1"})).toHaveLength(1);
+      expect(await repo.list(ACME_SCOPE, {action: "key.revoke"})).toHaveLength(1);
+      expect(await repo.list(ACME_SCOPE, {since: Math.floor(Date.now() / 1000) + 60})).toHaveLength(0);
     });
 
     it("rejects a malformed client ip rather than storing junk", async () => {
       const repo = new AuditLogRepository(pg.pool);
-      await expect(repo.record({actor: "a", action: "t", clientIp: "not-an-ip"})).rejects.toThrow();
+      await expect(repo.record({tenantId: ACME, actor: "a", action: "t", clientIp: "not-an-ip"})).rejects.toThrow();
     });
   });
 });

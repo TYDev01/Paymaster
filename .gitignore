@@ -68,3 +68,8 @@ Thumbs.db
 .idea/
 *.swp
 *~
+
+# Frontend build output and the screenshots taken while verifying it.
+frontend/.next/
+frontend/.shots/
+frontend/next-env.d.ts

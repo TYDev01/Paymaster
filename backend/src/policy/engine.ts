@@ -1,5 +1,6 @@
 import {ALLOW, deny, type PolicyContext, type PolicyDecision, type PolicyDenial} from "./context.js";
 import {isReserving, RULE_COST_ORDER, type PolicyRule, type ReservingRule} from "./rule.js";
+import type {TenantId} from "../db/scope.js";
 
 /**
  * A named, ordered collection of rules. Every rule must pass; the first denial wins.
@@ -10,6 +11,8 @@ import {isReserving, RULE_COST_ORDER, type PolicyRule, type ReservingRule} from 
  * on two API keys, which is auditable by reading it.
  */
 export interface Policy {
+  /** Which tenant owns this policy. Policy ids are unique per tenant, not globally. */
+  readonly tenantId: TenantId;
   readonly id: string;
   readonly rules: readonly PolicyRule[];
 }

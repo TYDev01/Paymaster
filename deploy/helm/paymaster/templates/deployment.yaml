@@ -45,8 +45,8 @@ spec:
             - secretRef:
                 name: {{ include "paymaster.secretName" . }}
           env:
-            # tsx and npx need a writable cache/temp dir, which readOnlyRootFilesystem denies on the
-            # image root — point them at the mounted emptyDir instead.
+            # readOnlyRootFilesystem denies writes to the image root, so anything that wants a
+            # temp or cache dir is pointed at the mounted emptyDir instead.
             - name: HOME
               value: /tmp
             - name: TMPDIR

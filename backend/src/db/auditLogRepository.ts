@@ -1,6 +1,9 @@
 import type {DatabasePool} from "./pool.js";
+import {isPlatform, type Scope, type TenantId} from "./scope.js";
 
 export interface AuditEntry {
+  /** The tenant acted within. Undefined for platform-level action with no tenant. */
+  readonly tenantId?: TenantId | undefined;
   /** An api key id, an admin id, or "system" for automated action. */
   readonly actor: string;
   readonly action: string;
@@ -44,10 +47,14 @@ export class AuditLogRepository {
 
   async record(entry: AuditEntry): Promise<bigint> {
     const {rows} = await this.pool.query<{id: string}>(
-      `INSERT INTO audit_logs (actor, action, subject, detail, client_ip)
-       VALUES ($1, $2, $3, $4::jsonb, $5::inet)
+      `INSERT INTO audit_logs (tenant_id, actor, action, subject, detail, client_ip)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::inet)
        RETURNING id`,
       [
+        // NULL for a platform action with no tenant — an operator changing global configuration.
+        // Tenant-scoped reads filter on the id and so never see those, which is intended: a
+        // customer's audit trail should not include the platform's own administration.
+        entry.tenantId ?? null,
         entry.actor,
         entry.action,
         entry.subject ?? null,
@@ -58,10 +65,14 @@ export class AuditLogRepository {
     return BigInt(rows[0]!.id);
   }
 
-  async list(query: AuditQuery = {}): Promise<readonly StoredAuditEntry[]> {
+  async list(scope: Scope, query: AuditQuery = {}): Promise<readonly StoredAuditEntry[]> {
     const conditions: string[] = [];
     const params: unknown[] = [];
 
+    if (!isPlatform(scope)) {
+      params.push(scope.tenantId);
+      conditions.push(`tenant_id = $${params.length}`);
+    }
     if (query.actor !== undefined) {
       params.push(query.actor);
       conditions.push(`actor = $${params.length}`);

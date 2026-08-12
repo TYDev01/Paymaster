@@ -17,6 +17,7 @@ import {extractApiKey, type ApiKeyAuthenticator, type Principal} from "../../aut
 import type {JwtService} from "../../auth/jwt.js";
 import {permissionsFor, type Permission} from "../../auth/permissions.js";
 import type {IpThrottle} from "../../security/ipThrottle.js";
+import {tenantId} from "../../db/scope.js";
 
 export const API_KEY_AUTHENTICATOR = Symbol("API_KEY_AUTHENTICATOR");
 /** Optional JWT verifier. Present only when ADMIN_JWT_SECRET is configured. */
@@ -121,6 +122,9 @@ export class ApiKeyGuard implements CanActivate {
       const verified = this.jwt.verify(presented, now);
       if (!verified.ok) return undefined;
       return {
+        // From the SIGNED claims, so a session cannot be pointed at another tenant by editing a
+        // header — the tenant is inside what the HMAC covers.
+        tenantId: tenantId(verified.claims.tenantId),
         apiKeyId: verified.claims.sub,
         name: verified.claims.name,
         roles: verified.claims.roles,

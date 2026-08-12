@@ -2,6 +2,7 @@ import type {Address} from "viem";
 
 import type {DatabasePool} from "./pool.js";
 import type {ClaimedReservation, SpendReconciliationStore} from "../reconciliation/spendReconciler.js";
+import type {TenantId} from "./scope.js";
 
 /**
  * Postgres-backed reconciliation state: the per-chain scan checkpoint and the atomic claim of an
@@ -56,6 +57,7 @@ export class PostgresSpendReconciliationStore implements SpendReconciliationStor
            FOR UPDATE SKIP LOCKED
         )
       RETURNING s.id,
+                s.tenant_id,
                 s.policy_id,
                 s.api_key_id,
                 s.max_cost_wei::text AS max_cost_wei,
@@ -73,6 +75,7 @@ export class PostgresSpendReconciliationStore implements SpendReconciliationStor
     const row = rows[0]!;
     return {
       sponsorshipId: BigInt(row.id),
+      tenantId: row.tenant_id as TenantId,
       policyId: row.policy_id,
       apiKeyId: row.api_key_id,
       reservedMaxCostWei: BigInt(row.max_cost_wei),
@@ -83,6 +86,7 @@ export class PostgresSpendReconciliationStore implements SpendReconciliationStor
 
 interface ClaimRow {
   id: string;
+  tenant_id: string;
   policy_id: string;
   api_key_id: string;
   max_cost_wei: string;

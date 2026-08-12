@@ -9,6 +9,7 @@ import {JwtService, type JwtOptions} from "../src/auth/jwt.js";
 import {ApiKeyGuard, RequirePermissions} from "../src/api/guards/apiKey.guard.js";
 import type {ApiKeyAuthenticator, AuthResult, Principal} from "../src/auth/authenticator.js";
 import {permissionsFor} from "../src/auth/permissions.js";
+import {ACME} from "./support/tenants.js";
 
 const SECRET = "a".repeat(40);
 const OPTS: JwtOptions = {issuer: "paymaster", audience: "paymaster-admin", ttlSeconds: 900};
@@ -21,32 +22,33 @@ function service(over: Partial<JwtOptions> = {}): JwtService {
 describe("JwtService", () => {
   it("round-trips a token and its claims", () => {
     const jwt = service();
-    const {token, expiresAt} = jwt.sign({sub: "key-1", name: "op", roles: ["admin"]}, NOW);
+    const {token, expiresAt} = jwt.sign({tenantId: ACME, sub: "key-1", name: "op", roles: ["admin"]}, NOW);
     expect(expiresAt).toBe(NOW + 900);
 
     const result = jwt.verify(token, NOW);
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.claims).toMatchObject({sub: "key-1", name: "op", roles: ["admin"], exp: NOW + 900});
+      expect(result.claims).toMatchObject({tenantId: ACME, sub: "key-1", name: "op", roles: ["admin"], exp: NOW + 900});
     }
   });
 
   it("carries a pinned policy id through", () => {
     const jwt = service();
-    const {token} = jwt.sign({sub: "k", name: "n", roles: ["sponsor"], policyId: "acme"}, NOW);
+    const {token} = jwt.sign({tenantId: ACME, sub: "k", name: "n", roles: ["sponsor"], policyId: "acme"}, NOW);
     const result = jwt.verify(token, NOW);
     expect(result.ok && result.claims.policyId).toBe("acme");
   });
 
   it("rejects a tampered payload", () => {
     const jwt = service();
-    const {token} = jwt.sign({sub: "k", name: "n", roles: ["sponsor"]}, NOW);
+    const {token} = jwt.sign({tenantId: ACME, sub: "k", name: "n", roles: ["sponsor"]}, NOW);
     const [h, , s] = token.split(".");
     // Swap in an admin-role payload while keeping the signature: must fail signature verification.
     const forged = Buffer.from(
       JSON.stringify({
         iss: "paymaster",
         aud: "paymaster-admin",
+        tenantId: ACME,
         sub: "k",
         name: "n",
         roles: ["admin"],
@@ -61,20 +63,26 @@ describe("JwtService", () => {
 
   it("rejects an expired token", () => {
     const jwt = service();
-    const {token} = jwt.sign({sub: "k", name: "n", roles: ["admin"]}, NOW);
+    const {token} = jwt.sign({tenantId: ACME, sub: "k", name: "n", roles: ["admin"]}, NOW);
     expect(jwt.verify(token, NOW + 901)).toEqual({ok: false, reason: "expired"});
   });
 
   it("rejects a token signed with a different secret", () => {
-    const {token} = new JwtService("b".repeat(40), OPTS).sign({sub: "k", name: "n", roles: ["admin"]}, NOW);
+    const {token} = new JwtService("b".repeat(40), OPTS).sign(
+      {tenantId: ACME, sub: "k", name: "n", roles: ["admin"]},
+      NOW,
+    );
     expect(service().verify(token, NOW)).toEqual({ok: false, reason: "bad-signature"});
   });
 
   it("rejects a wrong issuer or audience", () => {
-    const {token} = service({issuer: "evil"}).sign({sub: "k", name: "n", roles: ["admin"]}, NOW);
+    const {token} = service({issuer: "evil"}).sign({tenantId: ACME, sub: "k", name: "n", roles: ["admin"]}, NOW);
     expect(service().verify(token, NOW)).toEqual({ok: false, reason: "wrong-issuer"});
 
-    const {token: t2} = service({audience: "someone-else"}).sign({sub: "k", name: "n", roles: ["admin"]}, NOW);
+    const {token: t2} = service({audience: "someone-else"}).sign(
+      {tenantId: ACME, sub: "k", name: "n", roles: ["admin"]},
+      NOW,
+    );
     expect(service().verify(t2, NOW)).toEqual({ok: false, reason: "wrong-audience"});
   });
 
@@ -85,6 +93,7 @@ describe("JwtService", () => {
       JSON.stringify({
         iss: "paymaster",
         aud: "paymaster-admin",
+        tenantId: ACME,
         sub: "k",
         name: "n",
         roles: ["admin"],
@@ -135,13 +144,21 @@ function keyAuthenticator(principal: Principal | undefined): ApiKeyAuthenticator
 
 function principal(over: Partial<Principal> = {}): Principal {
   const roles = over.roles ?? (["admin"] as const);
-  return {apiKeyId: "key-1", name: "op", roles, permissions: permissionsFor(roles), policyId: undefined, ...over};
+  return {
+    tenantId: ACME,
+    apiKeyId: "key-1",
+    name: "op",
+    roles,
+    permissions: permissionsFor(roles),
+    policyId: undefined,
+    ...over,
+  };
 }
 
 describe("ApiKeyGuard with JWT", () => {
   it("authenticates a valid session token without touching the key store", async () => {
     const jwt = service();
-    const {token} = jwt.sign({sub: "op-1", name: "operator", roles: ["admin"]});
+    const {token} = jwt.sign({tenantId: ACME, sub: "op-1", name: "operator", roles: ["admin"]});
     // Key store would throw if consulted — proving the JWT path is taken for a non-key credential.
     const guard = new ApiKeyGuard(keyAuthenticator(undefined), new Reflector(), jwt);
 
@@ -164,7 +181,7 @@ describe("ApiKeyGuard with JWT", () => {
   it("enforces permissions carried by the token's roles", async () => {
     const jwt = service();
     // A viewer session must not pass a handler that requires key:write.
-    const {token} = jwt.sign({sub: "v", name: "viewer", roles: ["viewer"]});
+    const {token} = jwt.sign({tenantId: ACME, sub: "v", name: "viewer", roles: ["viewer"]});
     const reflector = new Reflector();
     const guard = new ApiKeyGuard(keyAuthenticator(undefined), reflector, jwt);
 

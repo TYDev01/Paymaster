@@ -21,6 +21,7 @@ import {LocalSponsorshipSigner} from "../src/signature/signer.js";
 import {deploy, loadArtifact, startAnvil, type AnvilInstance} from "./support/anvil.js";
 import {startRedis, type TestRedis} from "./support/redis.js";
 import {testEnv} from "./support/env.js";
+import {ACME} from "./support/tenants.js";
 
 /**
  * Load and concurrency behaviour of the sponsorship path — td.md's "load testing".
@@ -101,6 +102,7 @@ describe("sponsorship under concurrent load", () => {
     const quotas = new RedisQuotaStore(redisServer.redis);
     const policies: readonly Policy[] = [
       {
+        tenantId: ACME,
         id: "default",
         rules: [
           new ChainEnabledRule([chainId]),
@@ -127,6 +129,7 @@ describe("sponsorship under concurrent load", () => {
       quotasAreLocal: false,
       apiKeys: new InMemoryApiKeyStore([
         {
+          tenantId: ACME,
           id: "load",
           name: "load",
           hash: generated.hash,

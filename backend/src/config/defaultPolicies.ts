@@ -1,4 +1,5 @@
 import {parseChainsJson, type Env} from "./env.js";
+import {DEFAULT_TENANT_ID} from "../db/scope.js";
 import type {PolicyDefinition} from "../db/postgresPolicyRepository.js";
 import type {Policy} from "../policy/engine.js";
 import {InMemoryQuotaStore} from "../policy/quota/inMemoryQuotaStore.js";
@@ -27,6 +28,10 @@ export function defaultPolicies(env: Env, store: QuotaStore = new InMemoryQuotaS
 
   return [
     {
+      // Without a database there is exactly one tenant, so the in-code set belongs to the same
+      // default tenant every existing row is backfilled to. The two deployments then resolve
+      // policies identically rather than diverging on the key they look up.
+      tenantId: DEFAULT_TENANT_ID,
       id: env.DEFAULT_POLICY_ID,
       rules: [
         new ChainEnabledRule(enabledChainIds),

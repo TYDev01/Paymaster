@@ -22,6 +22,7 @@ import type {ApiKeyRecord} from "../src/auth/apiKeyStore.js";
 import type {Env} from "../src/config/env.js";
 import {deploy, loadArtifact, startAnvil, type AnvilInstance} from "./support/anvil.js";
 import {testEnv} from "./support/env.js";
+import {ACME} from "./support/tenants.js";
 
 /**
  * The full vertical slice: an HTTP request in, a sponsorship out, and the sponsorship actually
@@ -125,6 +126,7 @@ describe("POST /paymaster/sponsor", () => {
     blockedPolicyId = "blocked";
     const policies: readonly Policy[] = [
       {
+        tenantId: ACME,
         id: "default",
         rules: [
           new ChainEnabledRule([chainId]),
@@ -137,8 +139,9 @@ describe("POST /paymaster/sponsor", () => {
           }),
         ],
       },
-      {id: blockedPolicyId, rules: [new SenderBlocklistRule([account])]},
+      {tenantId: ACME, id: blockedPolicyId, rules: [new SenderBlocklistRule([account])]},
       {
+        tenantId: ACME,
         id: "tiny-quota",
         rules: [
           new QuotaRule(store, {
@@ -168,6 +171,7 @@ describe("POST /paymaster/sponsor", () => {
 
     const nowSec = Math.floor(Date.now() / 1000);
     const record = (gen: {hash: string; displayPrefix: string}, over: Partial<ApiKeyRecord>): ApiKeyRecord => ({
+      tenantId: ACME,
       id: over.id ?? "k",
       name: over.name ?? "key",
       hash: gen.hash,

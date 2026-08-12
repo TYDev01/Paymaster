@@ -43,6 +43,6 @@ export class SponsorController {
       ...(principal.policyId !== undefined ? {policyId: principal.policyId} : {}),
     };
 
-    return this.service.sponsor(scoped, {clientIp, apiKeyId: principal.apiKeyId});
+    return this.service.sponsor(scoped, {tenantId: principal.tenantId, clientIp, apiKeyId: principal.apiKeyId});
   }
 }

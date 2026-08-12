@@ -18,6 +18,7 @@ import {
   SenderBlocklistRule,
   TargetAllowlistRule,
 } from "../src/policy/rules/accessLists.js";
+import {ACME} from "./support/tenants.js";
 
 const SENDER = "0x1234567890123456789012345678901234567890" as Address;
 const USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" as Address;
@@ -70,7 +71,7 @@ function context(overrides: Partial<PolicyContext> = {}): PolicyContext {
 }
 
 function policy(...rules: PolicyRule[]): Policy {
-  return {id: "test", rules};
+  return {tenantId: ACME, id: "test", rules};
 }
 
 describe("decodeCallTargets", () => {
@@ -485,49 +486,51 @@ describe("PolicySource", () => {
   }
 
   it("serves policies after a reload", async () => {
-    const source = new PolicySource(new FakeRepository([{id: "a", rules: []}]));
+    const source = new PolicySource(new FakeRepository([{tenantId: ACME, id: "a", rules: []}]));
     await source.reload();
-    expect(source.get("a").id).toBe("a");
-    expect(source.has("b")).toBe(false);
+    expect(source.get(ACME, "a").id).toBe("a");
+    expect(source.has(ACME, "b")).toBe(false);
   });
 
   it("throws for an unknown policy rather than defaulting to permissive", () => {
     const source = new PolicySource(new FakeRepository([]));
-    expect(() => source.get("nope")).toThrow(UnknownPolicyError);
+    expect(() => source.get(ACME, "nope")).toThrow(UnknownPolicyError);
   });
 
   it("swaps the whole set on reload", async () => {
-    const repo = new FakeRepository([{id: "a", rules: []}]);
+    const repo = new FakeRepository([{tenantId: ACME, id: "a", rules: []}]);
     const source = new PolicySource(repo);
     await source.reload();
 
-    repo.policies = [{id: "b", rules: []}];
+    repo.policies = [{tenantId: ACME, id: "b", rules: []}];
     await source.reload();
 
-    expect(source.has("a")).toBe(false);
-    expect(source.has("b")).toBe(true);
+    expect(source.has(ACME, "a")).toBe(false);
+    expect(source.has(ACME, "b")).toBe(true);
     expect(source.generation).toBe(2);
   });
 
   /** An in-flight evaluation must not observe a set that changed underneath it. */
   it("leaves a snapshot taken before a reload unchanged", async () => {
-    const repo = new FakeRepository([{id: "a", rules: []}]);
+    const repo = new FakeRepository([{tenantId: ACME, id: "a", rules: []}]);
     const source = new PolicySource(repo);
     await source.reload();
 
     const snapshot = source.snapshot();
-    repo.policies = [{id: "b", rules: []}];
+    repo.policies = [{tenantId: ACME, id: "b", rules: []}];
     await source.reload();
 
-    expect(snapshot.has("a"), "snapshot must be immutable across reloads").toBe(true);
-    expect(snapshot.has("b")).toBe(false);
+    expect(
+      snapshot.map((p) => p.id),
+      "snapshot must be immutable across reloads",
+    ).toEqual(["a"]);
   });
 
   it("rejects a set with duplicate ids rather than picking a winner", async () => {
     const source = new PolicySource(
       new FakeRepository([
-        {id: "dup", rules: []},
-        {id: "dup", rules: []},
+        {tenantId: ACME, id: "dup", rules: []},
+        {tenantId: ACME, id: "dup", rules: []},
       ]),
     );
     await expect(source.reload()).rejects.toThrow(/duplicate policy id/);
@@ -539,7 +542,7 @@ describe("PolicySource", () => {
     const source = new PolicySource({
       load: async () => {
         if (fail) throw new Error("database unreachable");
-        return [{id: "a", rules: []}];
+        return [{tenantId: ACME, id: "a", rules: []}];
       },
     });
 
@@ -547,7 +550,7 @@ describe("PolicySource", () => {
     fail = true;
     await expect(source.reload()).rejects.toThrow("database unreachable");
 
-    expect(source.has("a"), "previous policy set must survive a failed reload").toBe(true);
+    expect(source.has(ACME, "a"), "previous policy set must survive a failed reload").toBe(true);
     expect(source.generation).toBe(1);
   });
 });

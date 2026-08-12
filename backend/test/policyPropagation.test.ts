@@ -7,6 +7,7 @@ import type {Policy} from "../src/policy/engine.js";
 import {AlwaysLeader, RedisLeaderLock, type RedisLockClient} from "../src/monitoring/leaderLock.js";
 import {LeaderOnlyAlerter} from "../src/monitoring/leaderAlerter.js";
 import type {Alert, Alerter} from "../src/monitoring/alerting.js";
+import {ACME} from "./support/tenants.js";
 
 /** An in-memory pub/sub pair standing in for Redis: publish reaches every OTHER subscriber. */
 function pubsub(): {client: () => RedisPubSubClient; published: string[]} {
@@ -36,7 +37,7 @@ function sourceOf(policies: Policy[]): {source: PolicySource; loads: () => numbe
   return {source, loads: () => loads};
 }
 
-const policy = (id: string): Policy => ({id, rules: []});
+const policy = (id: string): Policy => ({tenantId: ACME, id, rules: []});
 
 describe("policy propagation across replicas", () => {
   it("reloads a peer when a change is announced", async () => {
@@ -56,7 +57,7 @@ describe("policy propagation across replicas", () => {
     // A change lands on the admin replica.
     policies.push(policy("b"));
     await publisher.publish();
-    await vi.waitFor(() => expect(source.has("b")).toBe(true));
+    await vi.waitFor(() => expect(source.has(ACME, "b")).toBe(true));
 
     await reloader.stop();
   });
@@ -87,7 +88,7 @@ describe("policy propagation across replicas", () => {
     await reloader.start();
 
     policies.push(policy("b"));
-    await vi.waitFor(() => expect(source.has("b")).toBe(true));
+    await vi.waitFor(() => expect(source.has(ACME, "b")).toBe(true));
     expect(loads()).toBeGreaterThan(1);
 
     await reloader.stop();
@@ -128,7 +129,7 @@ describe("policy propagation across replicas", () => {
 
     // The second did not run concurrently; it ran after, so the later state is the one installed.
     expect(seen).toEqual(["load1", "load2"]);
-    expect(source.has("gen2")).toBe(true);
+    expect(source.has(ACME, "gen2")).toBe(true);
   });
 });
 

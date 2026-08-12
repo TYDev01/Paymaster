@@ -44,6 +44,7 @@ tests have each been shown to fail when the code they guard is broken. See
 | [contracts/](contracts/) | Foundry project: `VerifyingPaymaster.sol`, deploy script, 35 tests |
 | [backend/](backend/) | NestJS sponsorship + admin API, policy/signature engines, DB, Redis |
 | [sdk/](sdk/) | Framework-agnostic TypeScript SDK + runnable example |
+| [frontend/](frontend/) | Operations console (Next.js): live metrics, chains, funding, alerts |
 | [deploy/](deploy/) | Devnet setup, multi-chain deploy + verification, Helm chart, monitoring config, k6 load test |
 | [docker-compose.yml](docker-compose.yml) | Dev stack: postgres, redis, anvil, bundler, backend |
 | [docs/](docs/) | Architecture, security, deployment, operations, runbooks, DR, monitoring, development |
@@ -97,7 +98,7 @@ inside the stack uses those host ports.
 # 100% line/statement/branch/function coverage, enforced in CI.
 cd contracts && forge test
 
-# Backend + SDK: 469 tests, incl. real Postgres, Redis, EntryPoint, a real bundler, 200-way
+# Backend + SDK: 474 tests, incl. real Postgres, Redis, EntryPoint, a real bundler, 200-way
 # concurrency against real Redis, 2,000-case property tests, and a fork of Ethereum mainnet.
 # Integration suites self-skip when their infra (rundler binary, postgres, redis) is absent.
 npm test
@@ -134,11 +135,12 @@ something to point at mainnet without the hardening listed below.**
 | JWT admin auth, request signing, circuit breakers, IP throttling | ✅ |
 | Deposit/stake monitor + spend-cap reconciliation | ✅ |
 | Metrics, alert rules, Grafana, OTLP tracing, pager sink | ✅ see [docs/MONITORING.md](docs/MONITORING.md) |
-| Kubernetes / Helm chart | ✅ not lint-checked here (no `helm` binary) |
+| Kubernetes / Helm chart | ✅ linted + rendered, with value validation |
 | Multi-chain deploy + explorer verification | ✅ exercised against a live node |
 | Cross-replica policy propagation + leader lock | ✅ vs real Redis |
 | Load, property-based and forked-chain tests | ✅ incl. mainnet fork vs the real EntryPoint |
 | Documentation set | ✅ see [docs/](docs/) |
+| Operations console (Next.js) | ✅ reads the real /metrics, /health and admin API |
 | Docker Compose stack | ✅ booted end to end, incl. the monitoring profile |
 
 Coverage is measured against the full suite — Postgres, Redis, anvil, rundler and a mainnet fork
@@ -147,13 +149,18 @@ included — not estimated:
 | | Lines | Statements | Branches | Functions |
 | --- | --- | --- | --- | --- |
 | Contracts | 100% | 100% | 100% | 100% |
-| Backend | 80.99% | 80.99% | 89.07% | 83.03% |
+| Backend | 82.86% | 82.86% | 89.14% | 83.85% |
+
+**Not built — a different product shape:** this is a SINGLE-TENANT paymaster (one operator, one
+shared deposit per chain, keys minted by that operator), which is what td.md and td2.md specify. The
+self-service SaaS shape — signup, per-tenant API keys, per-tenant funded balances, billing — needs a
+tenant model and a credit ledger that do not exist yet. Scoped in
+[docs/REMAINING.md](docs/REMAINING.md#-not-built-the-multi-tenant-saas-product).
 
 **Not yet done — deployment decisions rather than missing work:**
 
 - **Alertmanager routing** is not configured; routing, silencing and escalation are per-deployment.
 - Two alert-rule thresholds ship as `TUNE` placeholders that need real traffic to set.
-- The Helm chart has not been run through `helm lint` / `helm template` here (no `helm` binary).
 
 Full detail, including what was deliberately *not* built and why, is in
 [docs/REMAINING.md](docs/REMAINING.md).

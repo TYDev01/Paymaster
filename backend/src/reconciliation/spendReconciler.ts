@@ -5,6 +5,7 @@ import type {Policy} from "../policy/engine.js";
 import {QuotaRule, type SpendTrueUp} from "../policy/rules/quotaRules.js";
 import {IntervalLoop} from "../monitoring/intervalLoop.js";
 import type {BackgroundService} from "../monitoring/backgroundService.js";
+import type {TenantId} from "../db/scope.js";
 
 /** A settled UserOperationEvent, as the reconciler needs it. */
 export interface UserOperationEventRecord {
@@ -32,6 +33,8 @@ export interface UserOpEventSource {
 /** A sponsorship claimed for reconciliation — enough to refund its over-reservation. */
 export interface ClaimedReservation {
   readonly sponsorshipId: bigint;
+  /** Recorded on the sponsorship at signing time, so the refund is applied to the right tenant. */
+  readonly tenantId: TenantId;
   readonly policyId: string;
   readonly apiKeyId: string;
   readonly reservedMaxCostWei: bigint;
@@ -61,7 +64,12 @@ export interface SpendReconciliationStore {
 
 /** Resolves a policy id to its loaded rules. `PolicySource.get` satisfies this. */
 export interface PolicyLookup {
-  get(policyId: string): Policy;
+  /**
+   * Policy ids are unique per tenant, so a refund has to name both — the sponsorship row records
+   * which tenant it belonged to precisely so this lookup can be exact rather than a guess across
+   * tenants that happen to share a policy name.
+   */
+  get(tenantId: TenantId, policyId: string): Policy;
 }
 
 export interface SpendReconcilerOptions {
@@ -191,7 +199,7 @@ export class SpendReconciler implements BackgroundService {
   async #refund(chainId: number, claim: ClaimedReservation, event: UserOperationEventRecord): Promise<bigint> {
     let policy: Policy;
     try {
-      policy = this.#policies.get(claim.policyId);
+      policy = this.#policies.get(claim.tenantId, claim.policyId);
     } catch {
       // Policy deleted or disabled since sponsorship. The row is already marked reconciled; leaving
       // its reservation in place keeps the cap conservative, which is the safe direction.

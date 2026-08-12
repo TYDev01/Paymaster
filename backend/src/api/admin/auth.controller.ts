@@ -40,6 +40,7 @@ export class AuthController {
 
     const {token, expiresAt} = this.jwt.sign({
       sub: principal.apiKeyId,
+      tenantId: principal.tenantId,
       name: principal.name,
       roles: principal.roles,
       policyId: principal.policyId,

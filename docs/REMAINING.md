@@ -5,7 +5,7 @@ Every item here has been flagged during the build; nothing is aspirational fille
 by whether they **block production**, are **spec-required but non-blocking**, or are **hardening**.
 
 Legend: 🔴 blocks production · 🟡 spec-required, not blocking · 🟢 hardening / nice-to-have ·
-✅ done this pass
+🔵 beyond the current spec · ✅ done this pass
 
 ---
 
@@ -52,10 +52,216 @@ Legend: 🔴 blocks production · 🟡 spec-required, not blocking · 🟢 harde
   wired into CI. Coverage numbers are deliberately not cited until the full suite is run.
 
 **Nothing on td.md's or td2.md's lists is now outstanding.** Every item is either done — including
-the Docker Compose stack, booted and verified end to end — or listed under "Deliberately NOT built"
-with its reasoning. What remains are deployment-specific decisions (Alertmanager routing, tuning two
-alert thresholds to real traffic) and `helm lint`, which needs a `helm` binary this environment does
-not have.
+the Docker Compose stack, booted and verified end to end, and the Helm chart, now linted and
+rendered — or listed under "Deliberately NOT built" with its reasoning. What remains are
+deployment-specific decisions: Alertmanager routing, and tuning two alert thresholds to real traffic.
+
+Both the image and the chart are now built and rendered in CI (the `deploy-artifacts` job), because
+every defect found in them survived precisely as long as nothing built them.
+
+---
+
+## 🔵 Not built: the multi-tenant SaaS product
+
+**This is the largest open item, and it is a change of product shape rather than a feature.** What
+exists today is a SINGLE-TENANT paymaster: one operator, one shared deposit per chain, one policy
+set, and API keys minted by that operator through an authenticated admin API. td.md and td2.md
+describe exactly that, and it is built.
+
+The intended product is different: a self-service platform where a dApp developer signs up, gets
+their own API key, funds their own balance, and spends only what they funded. Everything below is
+what separates the two.
+
+### Why the Funding page has no "Fund" button
+
+The button is the easy part; it would be dishonest without the ledger behind it.
+
+`deposit()` on the paymaster is deliberately not owner-gated and `receive()` forwards a bare
+transfer into the EntryPoint deposit, so anyone can already top it up from a wallet. But there is
+**one deposit per chain, shared by every caller**. With no per-tenant accounting, a customer who
+funded it would be funding the pool that everyone else spends from — their money would subsidise
+other tenants, and nothing in the system could tell you whose balance had been consumed.
+
+So the missing piece is not UI. It is a **balance that belongs to someone**.
+
+### What has to exist first
+
+In dependency order — each item needs the ones above it.
+
+1. ✅ **A tenant model — BUILT.** Migration `0004_tenants.sql` adds `tenants` and `tenant_members`,
+   and a `tenant_id` to policies, policy rules, api keys, sponsorships and the audit log. Every
+   existing row backfills to one `default` tenant, so a single-tenant deployment upgrades and keeps
+   behaving identically — verified in `test/tenantMigration.test.ts`, which brings a database up to
+   0003, writes rows the way that version wrote them, and only then applies 0004.
+
+   Two schema decisions carry the weight:
+
+   * **A policy id is unique per tenant, not globally** (`PRIMARY KEY (tenant_id, id)`). Without it
+     the first customer to create a policy called "default" takes the name from everyone else — and
+     `DEFAULT_POLICY_ID` means every tenant wants exactly that name.
+   * **A key may only pin a policy in its own tenant**, enforced by a composite foreign key on
+     `(tenant_id, policy_id)`. Cross-tenant pinning is unrepresentable in the database rather than
+     something the admin path must remember to check.
+
+   Scoping is enforced in the STORE, not the controller: every repository method takes a `Scope`
+   (`src/db/scope.ts`), and `TenantId` is a branded type, so a query that forgets to scope does not
+   compile. Reading across tenants is possible but never accidental — it needs the named
+   `PLATFORM_SCOPE`, so `grep PLATFORM_SCOPE` lists every place it happens. Writes refuse platform
+   scope outright, because a row with no owner is invisible to every tenant-scoped read forever.
+
+   The in-memory policy set is keyed by `(tenant, policyId)` too. Keying by id alone would have let
+   whichever tenant's "default" loaded last serve BOTH — a cross-tenant authorisation bug with no
+   error anywhere.
+
+   `test/tenantIsolation.test.ts` asserts the boundary against a real PostgreSQL: one tenant cannot
+   list, read, overwrite, or delete another's policies or keys, cannot see their sponsorships or
+   audit trail, and cannot pin a key across the boundary. Row-level security would be stronger still
+   and is noted in `scope.ts` as the additive next step.
+
+   Note for whichever contract shape wins: a factory using CREATE2 keyed on the tenant id gives the
+   same paymaster address on every chain, which makes the tenant's configuration identical
+   everywhere and is worth having. OZ's `EIP712` is clone-safe — it recomputes the domain separator
+   when `address(this)` differs from the cached one — so minimal proxies do not break the signature
+   domain. The ownership split needs deciding separately: a tenant who fully owns their paymaster
+   can remove the platform's signer and brick their own sponsorship, or withdraw the stake, so
+   "owner" has to be split into platform-controlled signer management and tenant-controlled
+   withdrawal rather than a single `Ownable`.
+2. ✅ **Authentication for humans — BUILT.** `IdentityProvider` is a port; `PrivyIdentityProvider`
+   verifies Privy's ES256 access tokens against the app's published JWKS, and `TenantSessionService`
+   exchanges a verified person for a session scoped to ONE tenant they are a member of.
+
+   The exchange is three steps that deliberately cannot collapse into one: the provider says *who*
+   someone is, `tenant_members` says *which tenants* that person may act within, and the session is
+   minted for one of them with the role that membership grants. A compromised provider could
+   therefore impersonate a person but could not grant itself access to a tenant that person does not
+   belong to — naming a tenant is a request, never a grant.
+
+   Endpoints: `POST /auth/tenants` (which organisations am I in), `POST /auth/session` (exchange),
+   `POST /auth/signup` (create one, off unless `TENANT_SELF_SIGNUP`). Every failure returns the same
+   401 body, so the response cannot be used to enumerate tenants.
+
+   **No human session ever gets `sponsor`.** Owners and admins map to `admin`, members to `viewer`.
+   A dashboard login must not be able to spend the tenant's balance — that is what an API key held
+   by their server is for — so a stolen session can read and configure but never drain.
+
+   Verification is hand-rolled for the same reason the operator JWT is, and tested against real
+   ES256 signatures rather than a stub: the likeliest bug is cryptographic. A JWS carries the raw
+   `r||s` pair rather than DER, so Node needs `dsaEncoding: "ieee-p1363"` — get it wrong and every
+   valid token is rejected. The suite covers tampering, `alg:none`, a token minted for another Privy
+   app, key rotation, an unreachable provider, and that unknown `kid`s cannot be used to turn this
+   service into a request amplifier against Privy.
+
+3. **Self-service key issuance.** *(next)* The current auth is machine-to-machine: API keys, plus optional
+   operator JWTs. Privy would sit in front as the human identity provider (social login + embedded
+   wallet), exchanged for a session bound to a tenant. The existing `JwtService` is a reasonable
+   place for that session to land; the API-key path stays exactly as it is for the dApp's server.
+4. **Self-service key issuance.** Keys are currently minted by an operator holding `key:write`, and
+   the roles (`sponsor`/`viewer`/`admin`) are operator-shaped. A tenant needs to mint keys scoped to
+   its OWN tenant and nothing else, which means a new role and — critically — tenant scoping
+   enforced in the store, not in the controller. A missing `WHERE tenant_id = $1` in one query is a
+   cross-tenant data leak.
+5. **A credit ledger.** The hard part, and the one that decides the product.
+
+   The chain gives us one deposit per paymaster address, so per-tenant on-chain deposits would mean
+   a paymaster contract per tenant — expensive to deploy, stake and monitor, and it multiplies the
+   stake requirement by the tenant count. The workable shape is the standard one: **a shared
+   on-chain deposit plus an off-chain credit ledger**. A tenant funds their balance (crypto transfer
+   or card), sponsorship debits it, and the operator keeps the shared deposit topped up.
+
+   That makes the ledger financially load-bearing, and it has to be exact:
+   - debits must be **reserved** at signing time and **trued up** to actual on-chain cost, which is
+     the same two-phase shape the spend caps already use;
+   - a tenant at zero must be refused **fail-closed**, because past zero the operator is paying;
+   - the ledger must reconcile against the on-chain deposit, or slow drift becomes unexplained loss.
+6. **Billing.** Usage metering, a pricing model (gas at cost plus margin, or a subscription), an
+   invoice, and a payment rail. Also the operational question of what happens when a card fails
+   while operations are in flight.
+7. **Tenant-scoped policy.** Today a policy is global and edited by the operator. A tenant needs to
+   edit its own policy, bounded by platform limits it cannot raise — nested limits, not a flat set.
+8. **The frontend for all of it.** Signup, org management, keys, funding, usage, invoices. The
+   current console is an OPERATOR view and read-only by design; this is a second, tenant-facing
+   surface with write paths and wallet connection.
+
+### What it can build on
+
+The foundations are better than they look, because per-key attribution already exists:
+
+- `sponsorships` records `api_key_id`, `max_cost_wei` and — once the reconciler has run —
+  `actual_gas_cost_wei`, indexed by `(api_key_id, created_at)`. That is a usage meter already.
+- `SpendReconciler` already trues reserved cost up to actual on-chain cost. A credit ledger needs
+  exactly that mechanism, pointed at a balance instead of a window counter.
+- `QuotaRule` already supports an `apiKey` subject, so per-key spend limits work today.
+- The policy engine's reserve/release shape is the right one for debiting a balance.
+
+The genuinely new work is the tenant boundary, the balance itself, and billing.
+
+### Decisions taken
+
+- **Funding rail: crypto only**, per chain. No card processor, so no PCI surface and no chargebacks.
+  A tenant funds a balance on each chain they want sponsorship on.
+- **Pricing: subscription.** This resolves well with self-funded gas, and the combination is
+  stronger than either alone: the subscription buys platform access and quota tier, while gas comes
+  out of the tenant's own funded balance. The platform therefore never fronts gas and carries no
+  credit risk on it — the worst case for an unpaid tenant is a suspended account, not a drained
+  deposit. Note that crypto-only subscriptions have no equivalent of a card mandate, so billing is
+  **prepaid periods** (pay for a term up front, with a grace window) rather than a recurring pull.
+- **Chains are administered, not deployed.** Today `CHAINS` is an environment variable, so adding a
+  chain is a redeploy. It moves into the database with admin CRUD and hot reload, exactly like the
+  policy set. One constraint carries over: the registry's startup check — that each RPC serves the
+  chain id it claims and the EntryPoint has code — has to run when a chain is ADDED or ENABLED, not
+  only at boot, or a typo becomes an opaque AA34 on every operation for that chain.
+- **Funds are per tenant, held on chain.** A tenant's balance is theirs, not a line in our ledger
+  that we could get wrong. See the open question below on how that is implemented.
+
+### Open: per-tenant paymaster, or per-tenant balance inside one paymaster
+
+The instinct — each tenant's money is theirs and visibly separate — is right. The question is
+whether "their own vault" means their own CONTRACT.
+
+**Stake is the constraint.** `EntryPoint.deposits` is `mapping(address => DepositInfo)`, so stake is
+per contract address. A paymaster must be staked to read its own storage during validation
+(ERC-7562), which ours does and always will. So one paymaster per tenant means **one stake per
+tenant per chain**, at rundler's 1 ETH default:
+
+| Tenants | Chains | Stake locked |
+| --- | --- | --- |
+| 10 | 4 | 40 ETH |
+| 50 | 4 | 200 ETH |
+| 200 | 6 | 1,200 ETH |
+
+That capital is idle — it secures nothing but the tenant's own reputation — and it is locked behind
+the unstake delay, so it cannot be recovered quickly when a tenant leaves. It is very likely to
+dominate the economics of the product before the gas does.
+
+The rest of the per-tenant-contract cost is real but secondary: deploy gas per tenant per chain, a
+funding monitor that iterates tenants × chains rather than chains, alerting whose cardinality now
+grows with the customer count, and a cold bundler reputation for every new tenant.
+
+**The alternative keeps the vault idea and drops the stake multiplier:** one shared, staked
+paymaster that holds `mapping(tenantId => uint256)` in its OWN storage. A staked paymaster may read
+its own storage during validation, which is the same permission it already relies on for the signer
+set and the pause flag — so it can check a tenant's balance while validating and refuse when it is
+empty. The tenant funds their own balance, only their balance pays for their operations, and both
+facts are enforced by the chain rather than by our bookkeeping.
+
+| | Paymaster per tenant | Balances inside one paymaster |
+| --- | --- | --- |
+| Stake | 1 ETH × tenants × chains | 1 ETH × chains |
+| Deploy cost | Per tenant, per chain | Once per chain |
+| Funds isolated on chain | Yes | Yes |
+| Blast radius of a pause | One tenant | All tenants |
+| Bundler reputation | Per tenant, starts cold | Shared, established |
+| Monitoring cardinality | Tenants × chains | Chains |
+
+**Recommendation: balances inside one paymaster, with a dedicated paymaster available as an
+opt-in** for a tenant large enough to want their own reputation and pause switch and to fund their
+own stake. That is the same factory, used for the exception rather than the default.
+
+**The implementation cost to be aware of either way:** the paymaster currently returns an empty
+context, so the EntryPoint never calls `postOp` at all — deliberately, because a verifying paymaster
+has nothing to settle after execution. Debiting a balance on chain means reserving `maxCost` during
+validation and refunding the difference in `postOp`, which brings that call back and adds gas to
+every sponsored operation. That is the price of the chain enforcing the accounting instead of us.
 
 ---
 
@@ -143,15 +349,28 @@ accepts either credential, disambiguated by shape (a `pm_*` key vs a JWT). Enabl
 on an ERC-20/721 holding, and fails closed. Registered in `policyFactory.ts` with a `token-ownership`
 schema (single token or per-chain map, minimum balance). Tested in `test/policyFactory.test.ts`.
 
-### ✅ Kubernetes / Helm — DONE
+### ✅ Kubernetes / Helm — DONE (linted, rendered, and validated)
 A chart at `deploy/helm/paymaster` (Deployment, Service, ConfigMap, optional Secret, HPA, PDB,
 ServiceMonitor, Ingress, ServiceAccount). The backend's statelessness shows through: it is a plain
 Deployment with no init ordering, because migrations self-serialise via the advisory lock. Liveness
 (`/health/live`) and readiness (`/health/ready`) are separate so an RPC outage sheds traffic without
 restart-looping; the root filesystem is read-only with an in-memory `/tmp`; secrets are bring-your-own
 by default (chart-managed only for dev). Rendered YAML is documented in `deploy/helm/paymaster/README.md`.
-Not linted here — `helm` is not installed in this environment — so run `helm lint` / `helm template`
-before first use.
+
+`helm lint` and `helm template` now run in CI, and rendering the chart found three configurations
+that produced valid YAML and a broken cluster:
+
+- **The default install was broken.** The Deployment mounts a Secret via `envFrom`, but the default
+  values (`create: false`, `existingSecret: ""`) never create one — so pods sat in
+  `CreateContainerConfigError`, a failure that says nothing about secrets.
+- **`config.chains` defaults to empty**, which renders `CHAINS: ""`; the backend rejects it at
+  startup. The single most likely first-install mistake produced a crash loop.
+- **`config.alerting.format=pagerduty`** rendered happily without a routing key, which the backend
+  also rejects at startup — three container restarts away from the value that caused it.
+
+All three now fail at `helm template` time with a sentence naming what is missing
+(`templates/_validate.tpl`), which is the same posture the backend takes with its own environment:
+fail closed, at startup, naming the variable.
 
 ### ✅ Monitoring stack (Prometheus / Grafana / OpenTelemetry) — DONE
 Documented end to end in [docs/MONITORING.md](MONITORING.md), including a runbook entry per alert.
@@ -235,13 +454,13 @@ Flat-config ESLint (`eslint.config.js`, typescript-eslint recommended + prettier
 both.
 
 ### ✅ Measure test coverage — DONE, both workspaces
-The full suite runs in this environment — 449 backend tests across 28 files (Postgres, Redis, anvil,
+The full suite runs in this environment — 454 backend tests across 29 files (Postgres, Redis, anvil,
 rundler and a mainnet fork included) and 35 contract tests — so these are measured, not estimated:
 
 | | Lines | Statements | Branches | Functions |
 | --- | --- | --- | --- | --- |
 | Contracts (`VerifyingPaymaster.sol`) | 100% | 100% | 100% | 100% |
-| Backend (`src/`) | 80.99% | 80.99% | 89.07% | 83.03% |
+| Backend (`src/`) | 82.86% | 82.86% | 89.14% | 83.85% |
 
 `forge coverage` is now wired into CI with a **100% floor** on the contract, so any new uncovered
 path fails the build. Reaching it found two genuinely untested behaviours worth having: `receive()`

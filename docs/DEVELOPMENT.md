@@ -48,6 +48,7 @@ all consume. Or bring up the full stack with `docker compose up`, and add
 contracts/    VerifyingPaymaster, its tests, and the deploy script
 backend/      The sponsorship service (NestJS over Fastify, but see below)
 sdk/          Framework-agnostic TypeScript client
+frontend/     Operations console (Next.js). A standalone npm project, NOT a root workspace
 deploy/       Deploy runners, Helm chart, monitoring config, load tests
 docs/         This documentation set
 ```
@@ -67,6 +68,11 @@ Inside `backend/src`:
 | `config/` | Environment parsing and the bootstrap policy set |
 
 ---
+
+The console is deliberately outside the npm workspaces and outside the root eslint/prettier config:
+Next pins its own React and tooling, and hoisting those into a monorepo whose other packages keep a
+small, audited dependency surface would couple two unrelated release cadences. It has its own
+`npm install`, its own lint, and its own README.
 
 ## Conventions
 
@@ -110,7 +116,7 @@ npx vitest --workspace @paymaster/backend  # watch
 (cd contracts && forge test -vvv)
 ```
 
-Backend coverage is **80.99% of statements** across 449 tests; the contract is at **100% of lines,
+Backend coverage is **82.86% of statements** across 454 tests; the contract is at **100% of lines,
 statements, branches and functions**, and CI fails if that drops.
 
 The suite is layered, and the layers are not interchangeable:

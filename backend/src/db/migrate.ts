@@ -79,7 +79,18 @@ export interface MigrateResult {
  *    Postgres has transactional DDL; this design would not port to MySQL unchanged.
  */
 export async function migrate(pool: Pool, dir?: string): Promise<MigrateResult> {
-  const migrations = await loadMigrations(dir);
+  return applyMigrations(pool, await loadMigrations(dir));
+}
+
+/**
+ * Applies a specific set of migrations, under the same lock `migrate` uses.
+ *
+ * Exists so the UPGRADE path is testable: a test can bring a database up to the previous version,
+ * write rows the way that version wrote them, and only then apply the next migration. A migration
+ * that works on an empty database and breaks on a populated one is the failure that matters, and it
+ * cannot be caught by applying the whole set at once.
+ */
+export async function applyMigrations(pool: Pool, migrations: readonly Migration[]): Promise<MigrateResult> {
   const client = await pool.connect();
 
   try {

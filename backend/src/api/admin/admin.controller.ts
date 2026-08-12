@@ -25,7 +25,8 @@ import {
   type CreateKeyRequest,
   type UpsertPolicyRequest,
 } from "./admin.dto.js";
-import type {AdminService} from "./admin.service.js";
+import type {ActorContext, AdminService} from "./admin.service.js";
+import {forTenant} from "../../db/scope.js";
 
 export const ADMIN_SERVICE = Symbol("ADMIN_SERVICE");
 
@@ -47,14 +48,14 @@ export class AdminController {
 
   @Get("policies")
   @RequirePermissions("policy:read")
-  async listPolicies() {
-    return {policies: await this.service.listPolicies()};
+  async listPolicies(@CurrentPrincipal() principal: Principal, @Ip() clientIp: string) {
+    return {policies: await this.service.listPolicies(actorContext(principal, clientIp))};
   }
 
   @Get("policies/:id")
   @RequirePermissions("policy:read")
-  async getPolicy(@Param("id") id: string) {
-    return this.service.getPolicy(id);
+  async getPolicy(@Param("id") id: string, @CurrentPrincipal() principal: Principal, @Ip() clientIp: string) {
+    return this.service.getPolicy(id, actorContext(principal, clientIp));
   }
 
   @Post("policies")
@@ -64,14 +65,14 @@ export class AdminController {
     @CurrentPrincipal() principal: Principal,
     @Ip() clientIp: string,
   ) {
-    return this.service.upsertPolicy(request, {actor: principal.apiKeyId, clientIp});
+    return this.service.upsertPolicy(request, actorContext(principal, clientIp));
   }
 
   @Delete("policies/:id")
   @RequirePermissions("policy:write")
   @HttpCode(HttpStatus.NO_CONTENT)
   async deletePolicy(@Param("id") id: string, @CurrentPrincipal() principal: Principal, @Ip() clientIp: string) {
-    const deleted = await this.service.deletePolicy(id, {actor: principal.apiKeyId, clientIp});
+    const deleted = await this.service.deletePolicy(id, actorContext(principal, clientIp));
     if (!deleted) throw new NotFoundException({error: "NOT_FOUND", message: `no policy with id ${id}`});
   }
 
@@ -80,7 +81,7 @@ export class AdminController {
   @RequirePermissions("policy:write")
   @HttpCode(HttpStatus.OK)
   async reload(@CurrentPrincipal() principal: Principal, @Ip() clientIp: string) {
-    return this.service.reloadPolicies({actor: principal.apiKeyId, clientIp});
+    return this.service.reloadPolicies(actorContext(principal, clientIp));
   }
 
   // ------------------------------------------------------------------------------------------
@@ -89,9 +90,9 @@ export class AdminController {
 
   @Get("keys")
   @RequirePermissions("key:read")
-  async listKeys() {
+  async listKeys(@CurrentPrincipal() principal: Principal, @Ip() clientIp: string) {
     // Contains no secrets: they are not stored and cannot be recovered.
-    return {keys: await this.service.listKeys()};
+    return {keys: await this.service.listKeys(actorContext(principal, clientIp))};
   }
 
   /** The only response in the system that ever contains a key secret. */
@@ -102,7 +103,7 @@ export class AdminController {
     @CurrentPrincipal() principal: Principal,
     @Ip() clientIp: string,
   ) {
-    const created = await this.service.createKey(request, {actor: principal.apiKeyId, clientIp});
+    const created = await this.service.createKey(request, actorContext(principal, clientIp));
     return {
       ...created,
       warning: "The secret is shown once and is not recoverable. Store it now.",
@@ -113,7 +114,7 @@ export class AdminController {
   @RequirePermissions("key:write")
   @HttpCode(HttpStatus.NO_CONTENT)
   async revokeKey(@Param("id") id: string, @CurrentPrincipal() principal: Principal, @Ip() clientIp: string) {
-    const revoked = await this.service.revokeKey(id, {actor: principal.apiKeyId, clientIp});
+    const revoked = await this.service.revokeKey(id, actorContext(principal, clientIp));
     if (!revoked) {
       throw new NotFoundException({error: "NOT_FOUND", message: `no active key with id ${id}`});
     }
@@ -125,8 +126,12 @@ export class AdminController {
 
   @Get("sponsorships")
   @RequirePermissions("metrics:read")
-  async listSponsorships(@Query(new ZodValidationPipe(listSponsorshipsSchema)) query: Record<string, never>) {
-    const rows = await this.service.listSponsorships(query);
+  async listSponsorships(
+    @Query(new ZodValidationPipe(listSponsorshipsSchema)) query: Record<string, never>,
+    @CurrentPrincipal() principal: Principal,
+    @Ip() clientIp: string,
+  ) {
+    const rows = await this.service.listSponsorships(query, actorContext(principal, clientIp));
     return {
       // Named to resist the obvious misreading. These are commitments, not spend: most never land
       // on-chain, so summing them overstates cost.
@@ -142,8 +147,23 @@ export class AdminController {
 
   @Get("audit")
   @RequirePermissions("metrics:read")
-  async listAudit(@Query(new ZodValidationPipe(listAuditSchema)) query: Record<string, never>) {
-    const entries = await this.service.listAudit(query);
+  async listAudit(
+    @Query(new ZodValidationPipe(listAuditSchema)) query: Record<string, never>,
+    @CurrentPrincipal() principal: Principal,
+    @Ip() clientIp: string,
+  ) {
+    const entries = await this.service.listAudit(query, actorContext(principal, clientIp));
     return {entries: entries.map((entry) => ({...entry, id: entry.id.toString()}))};
   }
+}
+
+/**
+ * The scope for an administrative request, derived from the authenticated principal.
+ *
+ * Built from the PRINCIPAL and nothing else — never from a header, a query parameter or a body
+ * field. A caller-supplied tenant would let any authenticated key read and write inside any account
+ * simply by naming it, which is the single most likely way a boundary like this gets broken.
+ */
+function actorContext(principal: Principal, clientIp: string | undefined): ActorContext {
+  return {actor: principal.apiKeyId, clientIp, scope: forTenant(principal.tenantId)};
 }

@@ -12,6 +12,7 @@ import {SignatureEngine} from "../src/signature/signatureEngine.js";
 import {LocalSponsorshipSigner, type SponsorshipSigner} from "../src/signature/signer.js";
 import {SponsorService, SponsorshipDeniedError, type SponsorshipRecorder} from "../src/api/sponsor/sponsor.service.js";
 import type {SponsorRequest} from "../src/api/dto/sponsorRequest.js";
+import {ACME} from "./support/tenants.js";
 
 const SIGNER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" as Hex;
 const SENDER = "0x1234567890123456789012345678901234567890" as Address;
@@ -95,8 +96,10 @@ async function buildService(
 
 describe("SponsorService", () => {
   it("attests when policy approves", async () => {
-    const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [{id: "default", rules: []}]);
-    const response = await service.sponsor(request());
+    const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [
+      {tenantId: ACME, id: "default", rules: []},
+    ]);
+    const response = await service.sponsor(request(), {tenantId: ACME});
 
     expect(response.paymaster).toBe(PAYMASTER);
     expect(response.metadata.policyId).toBe("default");
@@ -105,8 +108,10 @@ describe("SponsorService", () => {
   });
 
   it("prices the operation with our gas limits, not the caller's", async () => {
-    const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [{id: "default", rules: []}]);
-    const response = await service.sponsor(request());
+    const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [
+      {tenantId: ACME, id: "default", rules: []},
+    ]);
+    const response = await service.sponsor(request(), {tenantId: ACME});
 
     // (500_000 + 200_000 + 300_000 + 50_000 + 100_000) * 20 gwei
     expect(response.metadata.maxCost).toBe(String(1_150_000n * 20_000_000_000n));
@@ -114,11 +119,11 @@ describe("SponsorService", () => {
 
   it("throws SponsorshipDeniedError carrying the denial", async () => {
     const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [
-      {id: "default", rules: [new SenderBlocklistRule([SENDER])]},
+      {tenantId: ACME, id: "default", rules: [new SenderBlocklistRule([SENDER])]},
     ]);
 
-    await expect(service.sponsor(request())).rejects.toThrow(SponsorshipDeniedError);
-    await expect(service.sponsor(request())).rejects.toMatchObject({
+    await expect(service.sponsor(request(), {tenantId: ACME})).rejects.toThrow(SponsorshipDeniedError);
+    await expect(service.sponsor(request(), {tenantId: ACME})).rejects.toMatchObject({
       denial: {code: "SENDER_BLOCKED", rule: "sender-blocklist"},
     });
   });
@@ -138,18 +143,20 @@ describe("SponsorService", () => {
       windowSeconds: 86_400,
     });
     const service = await buildService(new FailingSigner(new Error("KMS unreachable")), [
-      {id: "default", rules: [quota]},
+      {tenantId: ACME, id: "default", rules: [quota]},
     ]);
 
-    await expect(service.sponsor(request())).rejects.toThrow("KMS unreachable");
+    await expect(service.sponsor(request(), {tenantId: ACME})).rejects.toThrow("KMS unreachable");
 
     const usage = await store.usage(`quota:wallet-daily:${CHAIN_ID}:${SENDER.toLowerCase()}`, 86_400, 1_700_000_000);
     expect(usage, "a failed sponsorship must not consume quota").toBe(0n);
   });
 
   it("still surfaces the original error when signing fails", async () => {
-    const service = await buildService(new FailingSigner(new Error("KMS unreachable")), [{id: "default", rules: []}]);
-    await expect(service.sponsor(request())).rejects.toThrow("KMS unreachable");
+    const service = await buildService(new FailingSigner(new Error("KMS unreachable")), [
+      {tenantId: ACME, id: "default", rules: []},
+    ]);
+    await expect(service.sponsor(request(), {tenantId: ACME})).rejects.toThrow("KMS unreachable");
   });
 
   /** A release failure must not mask the error that caused it. */
@@ -168,10 +175,10 @@ describe("SponsorService", () => {
     };
 
     const service = await buildService(new FailingSigner(new Error("KMS unreachable")), [
-      {id: "default", rules: [quota]},
+      {tenantId: ACME, id: "default", rules: [quota]},
     ]);
 
-    await expect(service.sponsor(request())).rejects.toThrow("KMS unreachable");
+    await expect(service.sponsor(request(), {tenantId: ACME})).rejects.toThrow("KMS unreachable");
   });
 
   it("does not consume quota when the request is denied outright", async () => {
@@ -184,10 +191,10 @@ describe("SponsorService", () => {
       windowSeconds: 86_400,
     });
     const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [
-      {id: "default", rules: [quota, new SenderBlocklistRule([SENDER])]},
+      {tenantId: ACME, id: "default", rules: [quota, new SenderBlocklistRule([SENDER])]},
     ]);
 
-    await expect(service.sponsor(request())).rejects.toThrow(SponsorshipDeniedError);
+    await expect(service.sponsor(request(), {tenantId: ACME})).rejects.toThrow(SponsorshipDeniedError);
 
     const usage = await store.usage(`quota:wallet-daily:${CHAIN_ID}:${SENDER.toLowerCase()}`, 86_400, 1_700_000_000);
     expect(usage).toBe(0n);
@@ -202,9 +209,11 @@ describe("SponsorService", () => {
       limit: 3n,
       windowSeconds: 86_400,
     });
-    const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [{id: "default", rules: [quota]}]);
+    const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [
+      {tenantId: ACME, id: "default", rules: [quota]},
+    ]);
 
-    await service.sponsor(request());
+    await service.sponsor(request(), {tenantId: ACME});
 
     const usage = await store.usage(`quota:wallet-daily:${CHAIN_ID}:${SENDER.toLowerCase()}`, 86_400, 1_700_000_000);
     expect(usage).toBe(1n);
@@ -215,14 +224,14 @@ describe("SponsorService", () => {
       const recorded: Parameters<SponsorshipRecorder["record"]>[0][] = [];
       const service = await buildService(
         new LocalSponsorshipSigner(SIGNER_KEY),
-        [{id: "default", rules: []}],
+        [{tenantId: ACME, id: "default", rules: []}],
         1_700_000_000,
         {
           record: async (s) => void recorded.push(s),
         },
       );
 
-      await service.sponsor(request(), {apiKeyId: "key-1"});
+      await service.sponsor(request(), {tenantId: ACME, apiKeyId: "key-1"});
 
       expect(recorded).toHaveLength(1);
       expect(recorded[0]).toMatchObject({
@@ -241,7 +250,7 @@ describe("SponsorService", () => {
     it("does not return an attestation it could not record", async () => {
       const service = await buildService(
         new LocalSponsorshipSigner(SIGNER_KEY),
-        [{id: "default", rules: []}],
+        [{tenantId: ACME, id: "default", rules: []}],
         1_700_000_000,
         {
           record: async () => {
@@ -250,7 +259,7 @@ describe("SponsorService", () => {
         },
       );
 
-      await expect(service.sponsor(request())).rejects.toThrow("database unreachable");
+      await expect(service.sponsor(request(), {tenantId: ACME})).rejects.toThrow("database unreachable");
     });
 
     it("refunds quota when recording fails", async () => {
@@ -264,7 +273,7 @@ describe("SponsorService", () => {
       });
       const service = await buildService(
         new LocalSponsorshipSigner(SIGNER_KEY),
-        [{id: "default", rules: [quota]}],
+        [{tenantId: ACME, id: "default", rules: [quota]}],
         1_700_000_000,
         {
           record: async () => {
@@ -273,7 +282,7 @@ describe("SponsorService", () => {
         },
       );
 
-      await expect(service.sponsor(request())).rejects.toThrow("database unreachable");
+      await expect(service.sponsor(request(), {tenantId: ACME})).rejects.toThrow("database unreachable");
 
       const usage = await store.usage(`quota:wallet-daily:${CHAIN_ID}:${SENDER.toLowerCase()}`, 86_400, 1_700_000_000);
       expect(usage, "a sponsorship we could not record must not consume quota").toBe(0n);
@@ -289,12 +298,16 @@ describe("SponsorService", () => {
       limit: 1n,
       windowSeconds: 3_600,
     });
-    const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [{id: "default", rules: [quota]}]);
+    const service = await buildService(new LocalSponsorshipSigner(SIGNER_KEY), [
+      {tenantId: ACME, id: "default", rules: [quota]},
+    ]);
 
-    await service.sponsor(request(), {clientIp: "203.0.113.7"});
-    await expect(service.sponsor(request(), {clientIp: "203.0.113.7"})).rejects.toThrow(SponsorshipDeniedError);
+    await service.sponsor(request(), {tenantId: ACME, clientIp: "203.0.113.7"});
+    await expect(service.sponsor(request(), {tenantId: ACME, clientIp: "203.0.113.7"})).rejects.toThrow(
+      SponsorshipDeniedError,
+    );
 
     // A different IP has its own budget.
-    await expect(service.sponsor(request(), {clientIp: "203.0.113.8"})).resolves.toBeDefined();
+    await expect(service.sponsor(request(), {tenantId: ACME, clientIp: "203.0.113.8"})).resolves.toBeDefined();
   });
 });

@@ -1,9 +1,12 @@
 import type {Address} from "viem";
 
 import type {DatabasePool} from "./pool.js";
+import {isPlatform, type Scope, type TenantId} from "./scope.js";
 
 /** An attestation we issued. Written at issue time, before the client can possibly submit it. */
 export interface SponsorshipRecord {
+  /** Whose sponsorship this is. Written at signing time and never updated. */
+  readonly tenantId: TenantId;
   readonly chainId: number;
   readonly sender: Address;
   readonly nonce: bigint;
@@ -43,11 +46,14 @@ export class SponsorshipRepository {
   async record(sponsorship: SponsorshipRecord): Promise<bigint> {
     const {rows} = await this.pool.query<{id: string}>(
       `INSERT INTO sponsorships (
-         chain_id, sender, nonce, paymaster, entry_point,
+         tenant_id, chain_id, sender, nonce, paymaster, entry_point,
          api_key_id, policy_id, signer, max_cost_wei, valid_after, valid_until
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), to_timestamp($11))
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, to_timestamp($11), to_timestamp($12))
        RETURNING id`,
       [
+        // Denormalised from the key deliberately: billing groups by tenant over a date range, and
+        // the tenant is fixed at write time because a key cannot change tenant.
+        sponsorship.tenantId,
         sponsorship.chainId,
         sponsorship.sender.toLowerCase(),
         // bigint -> string: node-postgres will not bind a JS bigint to NUMERIC, and going via
@@ -84,10 +90,14 @@ export class SponsorshipRepository {
    * because an admin endpoint without a ceiling is a way to ask the database to read the whole
    * table, which is a denial of service wearing a report's clothes.
    */
-  async list(query: SponsorshipQuery = {}): Promise<readonly StoredSponsorship[]> {
+  async list(scope: Scope, query: SponsorshipQuery = {}): Promise<readonly StoredSponsorship[]> {
     const conditions: string[] = [];
     const params: unknown[] = [];
 
+    if (!isPlatform(scope)) {
+      params.push(scope.tenantId);
+      conditions.push(`tenant_id = $${params.length}`);
+    }
     if (query.apiKeyId !== undefined) {
       params.push(query.apiKeyId);
       conditions.push(`api_key_id = $${params.length}`);
@@ -136,12 +146,13 @@ export class SponsorshipRepository {
 }
 
 const SELECT_COLUMNS = `
-  SELECT id, chain_id, sender, nonce::text AS nonce, paymaster, entry_point,
+  SELECT id, tenant_id, chain_id, sender, nonce::text AS nonce, paymaster, entry_point,
          api_key_id, policy_id, signer, max_cost_wei::text AS max_cost_wei,
          valid_after, valid_until, created_at
     FROM sponsorships`;
 
 interface SponsorshipRow {
+  tenant_id: string;
   id: string;
   chain_id: string;
   sender: string;
@@ -160,6 +171,7 @@ interface SponsorshipRow {
 function toStored(row: SponsorshipRow): StoredSponsorship {
   return {
     id: BigInt(row.id),
+    tenantId: row.tenant_id as TenantId,
     chainId: Number(row.chain_id),
     sender: row.sender as Address,
     nonce: BigInt(row.nonce),
