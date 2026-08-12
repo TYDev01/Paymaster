@@ -8,7 +8,7 @@ Next.js 16 (App Router) · Tailwind v4 · shadcn/ui · react-icons · Motion · 
 ```bash
 npm install
 cp .env.example .env.local     # point it at your backend
-npm run dev                    # http://localhost:3000
+npm run dev                    # http://localhost:3003
 ```
 
 ---
@@ -48,7 +48,7 @@ drawn as a negative rate or a spike, and the line breaks where the gap is.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `PAYMASTER_API_URL` | `http://127.0.0.1:3000` | Backend base URL, reached from the **server** |
+| `PAYMASTER_API_URL` | `http://127.0.0.1:3100` | Backend base URL, reached from the **server** |
 | `PAYMASTER_ADMIN_KEY` | — | Enables the Policies page. Server-side only |
 | `PAYMASTER_ALERT_RULES` | `../deploy/monitoring/prometheus/alerts.yml` | Path to the rule file |
 | `PAYMASTER_TIMEOUT_MS` | `5000` | Per-request timeout to the backend |

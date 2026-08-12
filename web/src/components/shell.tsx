@@ -9,10 +9,10 @@ import {useAuth} from "@/components/auth-provider";
 import {SignIn} from "@/components/sign-in";
 
 const NAV = [
-  {href: "/", label: "Overview", icon: LuZap},
-  {href: "/keys", label: "API keys", icon: LuKeyRound},
-  {href: "/funding", label: "Funding", icon: LuCoins},
-  {href: "/billing", label: "Billing", icon: LuReceipt},
+  {href: "/dashboard", label: "Overview", icon: LuZap},
+  {href: "/dashboard/keys", label: "API keys", icon: LuKeyRound},
+  {href: "/dashboard/funding", label: "Funding", icon: LuCoins},
+  {href: "/dashboard/billing", label: "Billing", icon: LuReceipt},
 ] as const;
 
 /**
@@ -35,7 +35,7 @@ export function Shell({children}: {children: ReactNode}) {
   return (
     <div className="flex min-h-screen bg-oil-950">
       <aside className="hidden w-60 shrink-0 flex-col border-r border-ash-800/60 bg-oil-900 sm:flex">
-        <div className="flex items-center gap-2.5 px-4 py-4">
+        <Link href="/" className="flex items-center gap-2.5 px-4 py-4 transition-opacity hover:opacity-80">
           <span className="grid size-7 place-items-center rounded-md bg-ash-200 text-oil-950">
             <LuZap className="size-4" aria-hidden />
           </span>
@@ -43,12 +43,14 @@ export function Shell({children}: {children: ReactNode}) {
             <p className="truncate text-sm font-semibold text-ash-100">{session.tenant.name}</p>
             <p className="truncate text-[11px] text-ash-600">{session.tenant.role}</p>
           </div>
-        </div>
+        </Link>
 
         <nav className="flex-1 px-2 py-2">
           <ul className="space-y-0.5">
             {NAV.map(({href, label, icon: Icon}) => {
-              const active = href === "/" ? pathname === "/" : pathname.startsWith(href);
+              // Exact match for the index, prefix for the rest — otherwise /dashboard stays lit on
+              // every child route and the nav never tells you where you are.
+              const active = href === "/dashboard" ? pathname === "/dashboard" : pathname.startsWith(href);
               return (
                 <li key={href}>
                   <Link

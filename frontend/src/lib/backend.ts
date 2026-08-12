@@ -20,7 +20,7 @@ export interface BackendConfig {
 
 export function backendConfig(): BackendConfig {
   return {
-    baseUrl: (process.env["PAYMASTER_API_URL"] ?? "http://127.0.0.1:3000").replace(/\/+$/, ""),
+    baseUrl: (process.env["PAYMASTER_API_URL"] ?? "http://127.0.0.1:3100").replace(/\/+$/, ""),
     adminKey: process.env["PAYMASTER_ADMIN_KEY"],
     // Optional. When set, charts show REAL history from Prometheus; without it they show a rolling
     // window built from polling /metrics, which starts empty when the page opens.

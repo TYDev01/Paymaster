@@ -3,15 +3,13 @@ import {Geist, Geist_Mono} from "next/font/google";
 import {MotionConfig} from "motion/react";
 
 import "./globals.css";
-import {AuthProvider} from "@/components/auth-provider";
-import {Shell} from "@/components/shell";
 
 const sans = Geist({variable: "--font-sans", subsets: ["latin"]});
 const mono = Geist_Mono({variable: "--font-geist-mono", subsets: ["latin"]});
 
 export const metadata: Metadata = {
-  title: "Paymaster",
-  description: "Sponsor gas for your dApp. Fund your own balance, mint your own keys.",
+  title: {default: "Paymaster", template: "%s · Paymaster"},
+  description: "Sponsor gas for your users. Fund a balance you own on chain, and spend only what you funded.",
 };
 
 /**
@@ -32,11 +30,7 @@ export default function RootLayout({children}: {children: React.ReactNode}) {
           runs. `reducedMotion="user"` honours the OS setting and jumps to the end state, which
           keeps the page readable for a reader who asked for reduced motion, and in print.
         */}
-        <MotionConfig reducedMotion="user">
-          <AuthProvider>
-            <Shell>{children}</Shell>
-          </AuthProvider>
-        </MotionConfig>
+        <MotionConfig reducedMotion="user">{children}</MotionConfig>
       </body>
     </html>
   );

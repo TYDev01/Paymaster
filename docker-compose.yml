@@ -147,7 +147,10 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}"
       OTEL_SERVICE_NAME: paymaster
     ports:
-      - "127.0.0.1:${BACKEND_HOST_PORT:-3000}:3000"
+      # 3100 on the host, still 3000 in the container. The public site (web/) owns 3000 because
+      # that is the address a person types; nothing about the backend's own port changed, so Helm
+      # and every in-cluster address are untouched.
+      - "127.0.0.1:${BACKEND_HOST_PORT:-3100}:3000"
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 5s

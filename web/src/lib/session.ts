@@ -35,7 +35,9 @@ export interface DashboardConfig {
 
 export function dashboardConfig(): DashboardConfig {
   return {
-    baseUrl: (process.env["PAYMASTER_API_URL"] ?? "http://127.0.0.1:3000").replace(/\/+$/, ""),
+    // 3100, not 3000: this app owns 3000, because that is the address a person types. The backend
+    // keeps 3000 as its own PORT inside its container — only the host mapping moves.
+    baseUrl: (process.env["PAYMASTER_API_URL"] ?? "http://127.0.0.1:3100").replace(/\/+$/, ""),
     timeoutMs: Number(process.env["PAYMASTER_TIMEOUT_MS"] ?? 8_000),
     // Defaults to ON. A deployment that forgets to set this gets the safe behaviour, and a
     // developer on http localhost is the one who has to opt out.

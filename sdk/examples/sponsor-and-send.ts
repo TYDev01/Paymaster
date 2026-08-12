@@ -22,7 +22,7 @@ async function main(): Promise<void> {
   const config = {
     chainId: Number(process.env["CHAIN_ID"] ?? 31337),
     entryPoint: (process.env["ENTRY_POINT"] ?? "0x0000000071727De22E5E9d8BAf0edAc6f37da032") as Address,
-    paymasterEndpoint: process.env["PAYMASTER_URL"] ?? "http://localhost:3000",
+    paymasterEndpoint: process.env["PAYMASTER_URL"] ?? "http://localhost:3100",
     bundlerEndpoint: process.env["BUNDLER_URL"] ?? "http://localhost:3001",
     apiKey: required("API_KEY"),
     accountOwnerKey: required("ACCOUNT_OWNER_KEY") as Hex,

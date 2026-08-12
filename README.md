@@ -41,13 +41,31 @@ tests have each been shown to fail when the code they guard is broken. See
 
 | Path | What |
 | --- | --- |
-| [contracts/](contracts/) | Foundry project: `VerifyingPaymaster.sol`, deploy script, 35 tests |
+| [contracts/](contracts/) | Foundry project: `VerifyingPaymaster.sol`, `TenantPaymaster.sol`, deploy script |
 | [backend/](backend/) | NestJS sponsorship + admin API, policy/signature engines, DB, Redis |
 | [sdk/](sdk/) | Framework-agnostic TypeScript SDK + runnable example |
-| [frontend/](frontend/) | Operations console (Next.js): live metrics, chains, funding, alerts |
+| [web/](web/) | The public site and the CUSTOMER dashboard (Next.js), on `:3000`. `/` explains the product; `/dashboard` is the signed-in account |
+| [frontend/](frontend/) | The OPERATOR console (Next.js), on `:3003`: live metrics, chains, funding, alerts |
 | [deploy/](deploy/) | Devnet setup, multi-chain deploy + verification, Helm chart, monitoring config, k6 load test |
 | [docker-compose.yml](docker-compose.yml) | Dev stack: postgres, redis, anvil, bundler, backend |
 | [docs/](docs/) | Architecture, security, deployment, operations, runbooks, DR, monitoring, development |
+
+### Ports, locally
+
+Two Next apps, a bundler and a Grafana all want a port in the low 3000s, so they are assigned
+rather than left to collide:
+
+| Port | What |
+| --- | --- |
+| 3000 | `web/` — the public site and `/dashboard`. It owns 3000 because that is the address a person types |
+| 3001 | Bundler (rundler) |
+| 3002 | Grafana |
+| 3003 | `frontend/` — the operator console |
+| 3100 | Backend API on the HOST. Inside its container it still listens on 3000, so nothing in Kubernetes changed |
+
+`web/` and `frontend/` are separate deployments on purpose. The operator console's server holds
+`PAYMASTER_ADMIN_KEY`, which reads and writes every tenant; the customer app authenticates as the
+signed-in customer and never has that credential in its process at all.
 
 ## Quickstart (local)
 

@@ -26,21 +26,21 @@ export default function OverviewPage() {
 
       <ol className="mt-6 space-y-3">
         <Step
-          href="/keys"
+          href="/dashboard/keys"
           icon={LuKeyRound}
           index={1}
           title="Mint an API key"
           detail="Your dApp calls the paymaster with this. It is shown once, at creation, and never again — we store only its hash, so a leaked key is revoked rather than recovered."
         />
         <Step
-          href="/funding"
+          href="/dashboard/funding"
           icon={LuCoins}
           index={2}
           title="Fund your balance"
           detail="Gas comes out of a balance you own on chain, per chain. Only your operations spend it, and that is enforced by the contract rather than by our bookkeeping."
         />
         <Step
-          href="/billing"
+          href="/dashboard/billing"
           icon={LuReceipt}
           index={3}
           title="Start a subscription"
