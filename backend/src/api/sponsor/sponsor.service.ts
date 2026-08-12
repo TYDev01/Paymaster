@@ -2,10 +2,11 @@ import {slice, toHex, type Address, type Hex} from "viem";
 
 import {calculateMaxCost} from "../../chain/gas.js";
 import type {ChainRegistry} from "../../chain/chainRegistry.js";
+import type {TenantBalanceReader} from "../../chain/tenantBalance.js";
 import {noopTracer, withSpan, type Span, type Tracer} from "../../monitoring/tracing.js";
 import type {TenantId} from "../../db/scope.js";
 import {decodeCallTargets} from "../../policy/callData.js";
-import type {PolicyContext, PolicyDenial} from "../../policy/context.js";
+import {deny, type PolicyContext, type PolicyDenial} from "../../policy/context.js";
 import type {PolicyEngine} from "../../policy/engine.js";
 import type {PolicySource} from "../../policy/policySource.js";
 import {onChainTenantKey} from "../../signature/paymasterLayout.js";
@@ -68,6 +69,12 @@ export interface SponsorServiceDeps {
    * but not recorded, and there is no audit trail. `bootstrap` warns about this.
    */
   readonly sponsorships?: SponsorshipRecorder | undefined;
+  /**
+   * Reads tenant balances so an unfunded request is refused before it is signed. Optional: absent
+   * on a deployment with no multi-tenant chain, and absent in tests that do not care. When it is
+   * absent the contract still refuses the operation — see the note at the call site.
+   */
+  readonly tenantBalances?: TenantBalanceReader | undefined;
   readonly options: SponsorServiceOptions;
   /** Injected so evaluation is deterministic and testable. Unix seconds. */
   readonly now?: () => number;
@@ -116,6 +123,25 @@ export class SponsorService {
     );
   }
 
+  /**
+   * Fails OPEN when the balance cannot be read.
+   *
+   * That is deliberate and is only defensible because of what this check is: an early, friendlier
+   * rejection of something the CONTRACT would refuse anyway. Failing closed would convert an RPC
+   * blip into a total sponsorship outage for every multi-tenant chain, to protect money that is
+   * already protected on chain. An unreadable balance therefore proceeds to signing, and an
+   * unfunded tenant gets the `AA33` it would have got before this check existed.
+   */
+  async #readBalance(chainId: number, tenant: TenantId): Promise<bigint | undefined> {
+    const balances = this.#deps.tenantBalances;
+    if (balances === undefined) return undefined;
+    try {
+      return await balances.balanceOf(chainId, tenant);
+    } catch {
+      return undefined;
+    }
+  }
+
   async #sponsor(request: SponsorRequest, caller: CallerIdentity, span: Span): Promise<SponsorResponse> {
     const {chains, policies, policyEngine, signatureEngine, options} = this.#deps;
 
@@ -136,6 +162,32 @@ export class SponsorService {
       paymasterVerificationGasLimit: options.paymasterVerificationGasLimit,
       postOpGasLimit: options.postOpGasLimit,
     });
+
+    /**
+     * Checked BEFORE the policy is evaluated, so there is no reservation to unwind when it fails
+     * and no RPC round-trip on a request policy would have refused anyway.
+     *
+     * This is a fail-fast, not the spend guard — the contract is the spend guard, and the reasons
+     * this cannot be are written out in `TenantBalanceReader`. It exists so that the ordinary case
+     * of a customer who has run out of money is a clean 402 instead of an `AA33` revert that costs
+     * us bundler reputation to discover.
+     */
+    if (chain.config.paymasterKind === "tenant") {
+      const balance = await this.#readBalance(request.chainId, caller.tenantId);
+      if (balance !== undefined && balance < maxCost) {
+        this.#deps.metrics?.recordSponsorship(request.chainId, "denied");
+        span.setAttribute("paymaster.outcome", "denied");
+        span.setAttribute("paymaster.denial_code", "TENANT_BALANCE_INSUFFICIENT");
+        throw new SponsorshipDeniedError(
+          deny(
+            "tenantBalance",
+            "TENANT_BALANCE_INSUFFICIENT",
+            `tenant balance ${balance} wei is below the ${maxCost} wei this operation may cost`,
+          ),
+          policyId,
+        );
+      }
+    }
 
     const now = this.#now();
     const context: PolicyContext = {
@@ -187,6 +239,10 @@ export class SponsorService {
           ? {kind: "verifying", ...attestationRequest}
           : {kind: "tenant", ...attestationRequest, tenant: onChainTenantKey(caller.tenantId)},
       );
+
+      // This tenant has just committed to spend, so the cached balance is now the most misleading
+      // number we hold — it is precisely the tenant about to run out who will ask again next.
+      this.#deps.tenantBalances?.invalidate(request.chainId, caller.tenantId);
 
       /**
        * Recorded BEFORE the attestation is returned, and awaited.

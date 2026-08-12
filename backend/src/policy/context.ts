@@ -78,6 +78,9 @@ export const POLICY_DENIAL_CODES = [
   "SPEND_CAP_EXCEEDED",
   "VALUE_NOT_ALLOWED",
   "TOKEN_BALANCE_INSUFFICIENT",
+  // Distinct from SPEND_CAP_EXCEEDED: that is a policy we chose, this is the customer's own money
+  // running out. The first is fixed by editing a rule, the second only by funding the balance.
+  "TENANT_BALANCE_INSUFFICIENT",
   "RULE_ERROR",
 ] as const;
 

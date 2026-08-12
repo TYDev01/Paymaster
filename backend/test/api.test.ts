@@ -10,6 +10,7 @@ import {AppModule, type AppDependencies} from "../src/api/app.module.js";
 import {DomainErrorFilter} from "../src/api/filters/domainError.filter.js";
 import {type ChainConfig} from "../src/chain/chainConfig.js";
 import {ChainRegistry} from "../src/chain/chainRegistry.js";
+import {TenantBalanceReader} from "../src/chain/tenantBalance.js";
 import type {Policy} from "../src/policy/engine.js";
 import {PolicySource} from "../src/policy/policySource.js";
 import {InMemoryQuotaStore} from "../src/policy/quota/inMemoryQuotaStore.js";
@@ -186,7 +187,18 @@ describe("POST /paymaster/sponsor", () => {
     });
 
     const deps: AppDependencies = {
-      chains: ChainRegistry.fromConfigs([chainConfig, {...chainConfig, chainId: 999_999, enabled: false}]),
+      chains: ChainRegistry.fromConfigs([
+        chainConfig,
+        {...chainConfig, chainId: 999_999, enabled: false},
+        // A multi-tenant chain with an empty balance, to exercise the 402 path.
+        {...chainConfig, chainId: 424_242, paymasterKind: "tenant"},
+      ]),
+      tenantBalances: new TenantBalanceReader(
+        {
+          get: () => ({config: {paymasterKind: "tenant" as const}, getTenantBalance: async () => 0n}),
+        } as unknown as ChainRegistry,
+        {ttlMs: 0},
+      ),
       policies: policySource,
       signer: new LocalSponsorshipSigner(signerKey),
       quotasAreLocal: true,
@@ -415,6 +427,19 @@ describe("POST /paymaster/sponsor", () => {
       const response = await post("/paymaster/sponsor", requestBody({policyId: blockedPolicyId}));
       expect(response.statusCode).toBe(403);
       expect(response.json()).toEqual({error: "SPONSORSHIP_DENIED", code: "SENDER_BLOCKED"});
+    });
+
+    /**
+     * 402, not 403 and not 429: the customer's own money has run out.
+     *
+     * The distinction is the whole point of the code. 403 says "this will never be allowed" and 429
+     * says "try again shortly"; neither tells a caller the one thing that is actually true and
+     * actionable, which is that the account needs funding.
+     */
+    it("402s when the tenant balance cannot cover the operation", async () => {
+      const response = await post("/paymaster/sponsor", {...requestBody(), chainId: 424_242});
+      expect(response.statusCode, response.body).toBe(402);
+      expect(response.json()).toEqual({error: "SPONSORSHIP_DENIED", code: "TENANT_BALANCE_INSUFFICIENT"});
     });
 
     /** 429, not 403: a quota denial is retryable and clients should back off. */

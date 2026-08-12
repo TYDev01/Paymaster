@@ -1,4 +1,4 @@
-import {createPublicClient, fallback, http, parseAbi, type Address, type PublicClient} from "viem";
+import {createPublicClient, fallback, http, parseAbi, type Address, type Hex, type PublicClient} from "viem";
 
 import type {ChainConfig} from "./chainConfig.js";
 import {CircuitBreaker, type CircuitBreakerOptions, type CircuitStateChange} from "../security/circuitBreaker.js";
@@ -23,6 +23,9 @@ const ENTRYPOINT_ABI = parseAbi([
  * token-ownership policy rule for either standard, and the rule decides how to interpret the number.
  */
 const TOKEN_BALANCE_ABI = parseAbi(["function balanceOf(address account) view returns (uint256)"]);
+
+/** `TenantPaymaster.balanceOf`. Same name as the ERC-20 one above, but keyed by tenant, not holder. */
+const TENANT_BALANCE_ABI = parseAbi(["function balanceOf(bytes32 tenant) view returns (uint256)"]);
 
 /**
  * The EntryPoint event the reconciler reads. `sender` and `paymaster` are indexed, so a log filter
@@ -251,6 +254,30 @@ export class ChainAdapter {
         abi: TOKEN_BALANCE_ABI,
         functionName: "balanceOf",
         args: [account],
+      }),
+    );
+  }
+
+  /**
+   * What a tenant has left to spend on this chain, in wei.
+   *
+   * Only meaningful where `paymasterKind` is `tenant` — the single-tenant contract has one shared
+   * deposit and no such mapping — so calling it elsewhere is a programming error rather than a
+   * condition to handle at runtime.
+   */
+  async getTenantBalance(tenant: Hex): Promise<bigint> {
+    if (this.config.paymasterKind !== "tenant") {
+      throw new Error(
+        `chain ${this.config.chainId} (${this.config.name}) runs a ${this.config.paymasterKind} ` +
+          "paymaster, which has no per-tenant balances",
+      );
+    }
+    return this.#call(() =>
+      this.#client.readContract({
+        address: this.config.paymaster,
+        abi: TENANT_BALANCE_ABI,
+        functionName: "balanceOf",
+        args: [tenant],
       }),
     );
   }
