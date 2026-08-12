@@ -88,9 +88,35 @@ So the missing piece is not UI. It is a **balance that belongs to someone**.
 
 In dependency order — each item needs the ones above it.
 
-1. **A tenant model.** Organisations, users, membership, and a tenant id on every row that can be
-   attributed. There is no such concept anywhere in the codebase today (`grep tenant` returns
-   nothing), and retrofitting one touches every admin query.
+1. ✅ **A tenant model — BUILT.** Migration `0004_tenants.sql` adds `tenants` and `tenant_members`,
+   and a `tenant_id` to policies, policy rules, api keys, sponsorships and the audit log. Every
+   existing row backfills to one `default` tenant, so a single-tenant deployment upgrades and keeps
+   behaving identically — verified in `test/tenantMigration.test.ts`, which brings a database up to
+   0003, writes rows the way that version wrote them, and only then applies 0004.
+
+   Two schema decisions carry the weight:
+
+   * **A policy id is unique per tenant, not globally** (`PRIMARY KEY (tenant_id, id)`). Without it
+     the first customer to create a policy called "default" takes the name from everyone else — and
+     `DEFAULT_POLICY_ID` means every tenant wants exactly that name.
+   * **A key may only pin a policy in its own tenant**, enforced by a composite foreign key on
+     `(tenant_id, policy_id)`. Cross-tenant pinning is unrepresentable in the database rather than
+     something the admin path must remember to check.
+
+   Scoping is enforced in the STORE, not the controller: every repository method takes a `Scope`
+   (`src/db/scope.ts`), and `TenantId` is a branded type, so a query that forgets to scope does not
+   compile. Reading across tenants is possible but never accidental — it needs the named
+   `PLATFORM_SCOPE`, so `grep PLATFORM_SCOPE` lists every place it happens. Writes refuse platform
+   scope outright, because a row with no owner is invisible to every tenant-scoped read forever.
+
+   The in-memory policy set is keyed by `(tenant, policyId)` too. Keying by id alone would have let
+   whichever tenant's "default" loaded last serve BOTH — a cross-tenant authorisation bug with no
+   error anywhere.
+
+   `test/tenantIsolation.test.ts` asserts the boundary against a real PostgreSQL: one tenant cannot
+   list, read, overwrite, or delete another's policies or keys, cannot see their sponsorships or
+   audit trail, and cannot pin a key across the boundary. Row-level security would be stronger still
+   and is noted in `scope.ts` as the additive next step.
 
    Note for whichever contract shape wins: a factory using CREATE2 keyed on the tenant id gives the
    same paymaster address on every chain, which makes the tenant's configuration identical
@@ -100,7 +126,7 @@ In dependency order — each item needs the ones above it.
    can remove the platform's signer and brick their own sponsorship, or withdraw the stake, so
    "owner" has to be split into platform-controlled signer management and tenant-controlled
    withdrawal rather than a single `Ownable`.
-2. **Authentication for humans.** The current auth is machine-to-machine: API keys, plus optional
+2. **Authentication for humans.** *(next)* The current auth is machine-to-machine: API keys, plus optional
    operator JWTs. Privy would sit in front as the human identity provider (social login + embedded
    wallet), exchanged for a session bound to a tenant. The existing `JwtService` is a reasonable
    place for that session to land; the API-key path stays exactly as it is for the dApp's server.

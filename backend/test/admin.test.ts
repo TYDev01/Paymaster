@@ -21,6 +21,7 @@ import {LocalSponsorshipSigner} from "../src/signature/signer.js";
 import type {Env} from "../src/config/env.js";
 import {startPostgres, type TestPostgres} from "./support/postgres.js";
 import {testEnv} from "./support/env.js";
+import {ACME, ACME_SCOPE} from "./support/tenants.js";
 
 const SIGNER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const PAYMASTER = "0x1111111111111111111111111111111111111111" as Address;
@@ -72,7 +73,7 @@ describe("admin API", () => {
 
     const mint = async (id: string, roles: readonly string[]) => {
       const gen = generateApiKey("test");
-      await keyStore.create({
+      await keyStore.create(ACME_SCOPE, {
         id,
         name: id,
         hash: gen.hash,
@@ -145,8 +146,8 @@ describe("admin API", () => {
       expect(response.json()).toMatchObject({id: "acme", enabled: true});
 
       // The point of hot reload: an operator expects the policy live now, not at the next poll.
-      expect(policySource.has("acme"), "policy must be serving without a restart").toBe(true);
-      expect(policySource.get("acme").rules).toHaveLength(3);
+      expect(policySource.has(ACME, "acme"), "policy must be serving without a restart").toBe(true);
+      expect(policySource.get(ACME, "acme").rules).toHaveLength(3);
     });
 
     it("lists and gets policies", async () => {
@@ -167,7 +168,7 @@ describe("admin API", () => {
 
       const policy = (await call("GET", "/admin/policies/acme", adminKey)).json();
       expect(policy.rules).toHaveLength(1);
-      expect(policySource.get("acme").rules).toHaveLength(1);
+      expect(policySource.get(ACME, "acme").rules).toHaveLength(1);
     });
 
     it("preserves rule order across a reload", async () => {
@@ -214,7 +215,7 @@ describe("admin API", () => {
     it("deletes a policy and stops serving it", async () => {
       await call("POST", "/admin/policies", adminKey, samplePolicy());
       expect((await call("DELETE", "/admin/policies/acme", adminKey)).statusCode).toBe(204);
-      expect(policySource.has("acme")).toBe(false);
+      expect(policySource.has(ACME, "acme")).toBe(false);
     });
 
     it("404s deleting an unknown policy", async () => {
@@ -233,12 +234,12 @@ describe("admin API", () => {
       // 409: well-formed, but conflicts with state the operator can resolve by unpinning the key.
       expect(response.statusCode).toBe(409);
       expect(response.json().error).toBe("POLICY_IN_USE");
-      expect(policySource.has("acme"), "the policy must still be serving").toBe(true);
+      expect(policySource.has(ACME, "acme"), "the policy must still be serving").toBe(true);
     });
 
     it("a disabled policy is not served", async () => {
       await call("POST", "/admin/policies", adminKey, samplePolicy({enabled: false}));
-      expect(policySource.has("acme")).toBe(false);
+      expect(policySource.has(ACME, "acme")).toBe(false);
       // ...but is still listed, so an operator can re-enable it.
       expect((await call("GET", "/admin/policies", adminKey)).json().policies).toHaveLength(1);
     });
@@ -256,25 +257,25 @@ describe("admin API", () => {
     /** Hot reload is only meaningful if a change made out-of-band is picked up. */
     it("picks up a change written directly to the database", async () => {
       await call("POST", "/admin/policies", adminKey, samplePolicy());
-      expect(policySource.get("acme").rules).toHaveLength(3);
+      expect(policySource.get(ACME, "acme").rules).toHaveLength(3);
 
       await pg.pool.query("DELETE FROM policy_rules WHERE policy_id = 'acme' AND rule_type = 'quota'");
       await call("POST", "/admin/policies/reload", adminKey);
 
-      expect(policySource.get("acme").rules).toHaveLength(2);
+      expect(policySource.get(ACME, "acme").rules).toHaveLength(2);
     });
 
     /** A broken row must degrade to stale policy, never to a policy missing a rule. */
     it("keeps the previous policy set when a reload finds an unbuildable rule", async () => {
       await call("POST", "/admin/policies", adminKey, samplePolicy());
-      expect(policySource.get("acme").rules).toHaveLength(3);
+      expect(policySource.get(ACME, "acme").rules).toHaveLength(3);
 
       // Corrupt a row behind the API's back, as a bad migration or manual edit would.
       await pg.pool.query("UPDATE policy_rules SET rule_type = 'nonsense' WHERE policy_id = 'acme' AND ordinal = 1");
 
       const response = await call("POST", "/admin/policies/reload", adminKey);
       expect(response.statusCode).toBe(400);
-      expect(policySource.get("acme").rules, "the last good policy must still serve").toHaveLength(3);
+      expect(policySource.get(ACME, "acme").rules, "the last good policy must still serve").toHaveLength(3);
     });
   });
 
@@ -400,6 +401,7 @@ describe("admin API", () => {
   describe("sponsorships", () => {
     it("lists issued attestations with a warning about what they mean", async () => {
       await new SponsorshipRepository(pg.pool).record({
+        tenantId: ACME,
         chainId: 8453,
         sender: SENDER as Address,
         nonce: 0n,

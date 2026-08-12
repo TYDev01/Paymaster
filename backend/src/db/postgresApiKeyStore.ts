@@ -1,8 +1,10 @@
 import type {ApiKeyRecord, ApiKeyStore} from "../auth/apiKeyStore.js";
 import {isRole, type Role} from "../auth/permissions.js";
 import type {DatabasePool} from "./pool.js";
+import {scopePredicate, writingTenant, type Scope, type TenantId} from "./scope.js";
 
 interface ApiKeyRow {
+  tenant_id: string;
   id: string;
   name: string;
   key_hash: string;
@@ -34,7 +36,8 @@ export class PostgresApiKeyStore implements ApiKeyStore {
    */
   async findByHash(hash: string): Promise<ApiKeyRecord | undefined> {
     const {rows} = await this.pool.query<ApiKeyRow>(
-      `SELECT id, name, key_hash, display_prefix, roles, policy_id, enabled, created_at, expires_at, last_used_at
+      `SELECT tenant_id, id, name, key_hash, display_prefix, roles, policy_id, enabled, created_at,
+              expires_at, last_used_at
          FROM api_keys
         WHERE key_hash = $1`,
       [hash],
@@ -43,11 +46,21 @@ export class PostgresApiKeyStore implements ApiKeyStore {
     return row === undefined ? undefined : toRecord(row);
   }
 
-  async create(record: ApiKeyRecord): Promise<void> {
+  /**
+   * Mints a key for the scope's tenant.
+   *
+   * The tenant comes from the SCOPE, never from the record: a caller who could name the tenant on
+   * the record could mint a key inside someone else's account. The composite foreign key on
+   * (tenant_id, policy_id) then refuses a key pinned to another tenant's policy, so that
+   * cross-tenant mistake is impossible to store even if this method were called wrongly.
+   */
+  async create(scope: Scope, record: Omit<ApiKeyRecord, "tenantId">): Promise<void> {
+    const owner = writingTenant(scope, "create an api key");
     await this.pool.query(
-      `INSERT INTO api_keys (id, name, key_hash, display_prefix, roles, policy_id, enabled, created_at, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, to_timestamp($8), $9)`,
+      `INSERT INTO api_keys (tenant_id, id, name, key_hash, display_prefix, roles, policy_id, enabled, created_at, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, to_timestamp($9), $10)`,
       [
+        owner,
         record.id,
         record.name,
         record.hash,
@@ -71,21 +84,30 @@ export class PostgresApiKeyStore implements ApiKeyStore {
    * Returns false when the key was already revoked — the WHERE clause makes this idempotent
    * without a read-then-write race.
    */
-  async revoke(id: string, now: number): Promise<boolean> {
+  async revoke(scope: Scope, id: string, now: number): Promise<boolean> {
+    const {sql, params, nextIndex} = scopePredicate(scope, "tenant_id", 3);
     const {rowCount} = await this.pool.query(
       `UPDATE api_keys
           SET enabled = false, revoked_at = to_timestamp($2)
-        WHERE id = $1 AND enabled`,
-      [id, now],
+        WHERE id = $1 AND enabled AND ${sql}`,
+      [id, now, ...params],
     );
+    void nextIndex;
+    // Returns false both when the key was already revoked and when it belongs to another tenant.
+    // Those are deliberately indistinguishable to the caller: distinguishing them would let one
+    // tenant probe another's key ids.
     return (rowCount ?? 0) > 0;
   }
 
-  async list(): Promise<readonly ApiKeyRecord[]> {
+  async list(scope: Scope): Promise<readonly ApiKeyRecord[]> {
+    const {sql, params} = scopePredicate(scope, "tenant_id");
     const {rows} = await this.pool.query<ApiKeyRow>(
-      `SELECT id, name, key_hash, display_prefix, roles, policy_id, enabled, created_at, expires_at, last_used_at
+      `SELECT tenant_id, id, name, key_hash, display_prefix, roles, policy_id, enabled, created_at,
+              expires_at, last_used_at
          FROM api_keys
+        WHERE ${sql}
         ORDER BY created_at DESC`,
+      [...params],
     );
     return rows.map(toRecord);
   }
@@ -96,6 +118,9 @@ export class PostgresApiKeyStore implements ApiKeyStore {
    *
    * `GREATEST` keeps the column monotonic: two replicas can race here, and the older timestamp
    * must not win and make a live key look stale.
+   *
+   * Unscoped, and correctly so: the id being touched came from `findByHash` moments earlier, so
+   * this is the key updating its own row. There is no caller-supplied id to constrain.
    */
   async touch(id: string, now: number): Promise<void> {
     await this.pool.query(
@@ -109,6 +134,7 @@ export class PostgresApiKeyStore implements ApiKeyStore {
 
 function toRecord(row: ApiKeyRow): ApiKeyRecord {
   return {
+    tenantId: row.tenant_id as TenantId,
     id: row.id,
     name: row.name,
     hash: row.key_hash,

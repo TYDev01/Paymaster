@@ -43,7 +43,7 @@ export interface TestPostgres {
  * The cluster is entirely self-contained: its own data directory under the OS temp dir, its own
  * port on loopback, trust auth, and no unix socket. It never touches an existing installation.
  */
-export async function startPostgres(): Promise<TestPostgres> {
+export async function startPostgres(options: {migrate?: boolean} = {}): Promise<TestPostgres> {
   const bin = await findBinDir();
   // mkdtemp under the OS temp dir, not the scratchpad: a unix socket path is capped at ~107 bytes
   // and the scratchpad path alone nearly exhausts it. We disable the socket anyway, but initdb and
@@ -68,7 +68,10 @@ export async function startPostgres(): Promise<TestPostgres> {
   const connectionString = `postgresql://paymaster@127.0.0.1:${port}/postgres`;
   const pool = createPool({connectionString, maxConnections: 5});
 
-  await migrate(pool);
+  // Skipped by tests that need to apply migrations THEMSELVES — an upgrade test has to bring the
+  // database up to the previous version, write data the way that version wrote it, and only then
+  // apply the next one.
+  if (options.migrate !== false) await migrate(pool);
 
   return {
     pool,

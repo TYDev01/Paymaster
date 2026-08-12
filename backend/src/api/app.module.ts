@@ -44,6 +44,7 @@ import {KmsSponsorshipSigner} from "../signature/kmsSigner.js";
 import {AwsKmsClient} from "../signature/awsKmsClient.js";
 import {defaultPolicyDefinition} from "../config/defaultPolicies.js";
 import {parseChainsJson, parseOtlpHeaders, type Env} from "../config/env.js";
+import {DEFAULT_TENANT_ID, forTenant, PLATFORM_SCOPE} from "../db/scope.js";
 import {API_KEY_AUTHENTICATOR, JWT_VERIFIER, SECURITY_IP_THROTTLE} from "./guards/apiKey.guard.js";
 import {AuthController} from "./admin/auth.controller.js";
 import {HealthController, HEALTH_DEPS, type HealthDeps} from "./health/health.controller.js";
@@ -449,11 +450,13 @@ function buildBackgroundServices(
  * is the one condition under which seeding cannot destroy information.
  */
 async function ensureBootstrapPolicy(repository: PostgresPolicyRepository, env: Env): Promise<void> {
-  const existing = await repository.list();
+  // Platform scope to CHECK — "is any tenant configured at all" is a platform question — and the
+  // default tenant's scope to WRITE, because a policy must belong to exactly one tenant.
+  const existing = await repository.list(PLATFORM_SCOPE);
   if (existing.length > 0) return;
 
   const logger = new Logger("bootstrap");
-  await repository.upsert(defaultPolicyDefinition(env));
+  await repository.upsert(forTenant(DEFAULT_TENANT_ID), defaultPolicyDefinition(env));
   logger.log(`seeded the bootstrap policy "${env.DEFAULT_POLICY_ID}" into an empty policy table`);
 }
 
@@ -496,6 +499,8 @@ function buildApiKeyStore(env: Env): ApiKeyStore {
 
   return new InMemoryApiKeyStore([
     {
+      // Without a database there is one tenant, and the bootstrap key belongs to it.
+      tenantId: DEFAULT_TENANT_ID,
       id: "bootstrap",
       name: "bootstrap admin key",
       hash: hashApiKey(env.BOOTSTRAP_API_KEY),

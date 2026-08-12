@@ -9,6 +9,7 @@ import type {AuditLogRepository} from "../../db/auditLogRepository.js";
 import type {PolicyDefinition, PostgresPolicyRepository, StoredPolicy} from "../../db/postgresPolicyRepository.js";
 import type {SponsorshipRepository, StoredSponsorship} from "../../db/sponsorshipRepository.js";
 import type {PolicyBroadcast} from "../../policy/policyBroadcast.js";
+import {writingTenant, type Scope} from "../../db/scope.js";
 import type {PolicySource} from "../../policy/policySource.js";
 import type {ApiKeyView, CreateKeyRequest, CreatedApiKeyView, UpsertPolicyRequest} from "./admin.dto.js";
 
@@ -42,6 +43,14 @@ export interface AdminDeps {
 export interface ActorContext {
   readonly actor: string;
   readonly clientIp: string | undefined;
+  /**
+   * The tenant this request acts within, taken from the authenticated principal.
+   *
+   * Part of the actor's identity rather than a separate argument, so it travels with every
+   * administrative call by construction: a new endpoint cannot read or write across tenants without
+   * inventing a scope from somewhere, and there is nowhere to invent one from.
+   */
+  readonly scope: Scope;
 }
 
 /**
@@ -59,12 +68,12 @@ export class AdminService {
   // policies
   // ------------------------------------------------------------------------------------------
 
-  async listPolicies(): Promise<readonly StoredPolicy[]> {
-    return this.#policies().list();
+  async listPolicies(context: ActorContext): Promise<readonly StoredPolicy[]> {
+    return this.#policies().list(context.scope);
   }
 
-  async getPolicy(id: string): Promise<StoredPolicy> {
-    return this.#policies().get(id);
+  async getPolicy(id: string, context: ActorContext): Promise<StoredPolicy> {
+    return this.#policies().get(context.scope, id);
   }
 
   /**
@@ -84,7 +93,7 @@ export class AdminService {
     };
 
     // Throws InvalidRuleConfigError before writing anything if a rule cannot be built.
-    await this.#policies().upsert(definition);
+    await this.#policies().upsert(context.scope, definition);
     await this.#reloadEverywhere();
 
     await this.#audit(context, "policy.upsert", `policy:${request.id}`, {
@@ -93,13 +102,13 @@ export class AdminService {
       ruleTypes: request.rules.map((r) => r.ruleType),
     });
 
-    return this.#policies().get(request.id);
+    return this.#policies().get(context.scope, request.id);
   }
 
   async deletePolicy(id: string, context: ActorContext): Promise<boolean> {
     let deleted: boolean;
     try {
-      deleted = await this.#policies().delete(id);
+      deleted = await this.#policies().delete(context.scope, id);
     } catch (error) {
       // The FK from api_keys.policy_id is ON DELETE RESTRICT: a policy still pinned by a key must
       // not vanish, because those keys would fall back to naming any policy they like.
@@ -140,8 +149,8 @@ export class AdminService {
   // api keys
   // ------------------------------------------------------------------------------------------
 
-  async listKeys(): Promise<readonly ApiKeyView[]> {
-    return (await this.deps.apiKeys.list()).map(toView);
+  async listKeys(context: ActorContext): Promise<readonly ApiKeyView[]> {
+    return (await this.deps.apiKeys.list(context.scope)).map(toView);
   }
 
   /**
@@ -152,7 +161,7 @@ export class AdminService {
    */
   async createKey(request: CreateKeyRequest, context: ActorContext): Promise<CreatedApiKeyView> {
     const generated = generateApiKey(request.environment);
-    const record: ApiKeyRecord = {
+    const record: Omit<ApiKeyRecord, "tenantId"> = {
       id: randomUUID(),
       name: request.name,
       hash: generated.hash,
@@ -165,7 +174,7 @@ export class AdminService {
       lastUsedAt: undefined,
     };
 
-    await this.deps.apiKeys.create(record);
+    await this.deps.apiKeys.create(context.scope, record);
     await this.#audit(context, "key.create", `api_key:${record.id}`, {
       name: record.name,
       roles: record.roles,
@@ -173,12 +182,17 @@ export class AdminService {
       displayPrefix: record.displayPrefix,
     });
 
-    return {...toView(record), secret: generated.secret};
+    // The record handed to the store omitted the tenant (the scope supplies it); the view puts it
+    // back so the response says which account the key was minted in.
+    return {
+      ...toView({...record, tenantId: writingTenant(context.scope, "create an api key")}),
+      secret: generated.secret,
+    };
   }
 
   /** td.md's "Rotate keys": revocation is a flag, so history survives. */
   async revokeKey(id: string, context: ActorContext): Promise<boolean> {
-    const revoked = await this.deps.apiKeys.revoke(id, Math.floor(Date.now() / 1000));
+    const revoked = await this.deps.apiKeys.revoke(context.scope, id, Math.floor(Date.now() / 1000));
     if (revoked) {
       await this.#audit(context, "key.revoke", `api_key:${id}`, {});
     }
@@ -197,15 +211,18 @@ export class AdminService {
    * cost from `UserOperationEvent`, but these rows keep the amount committed at signing time —
    * which is what an attestation actually promised, and so what an audit of it should show.
    */
-  async listSponsorships(query: {
-    apiKeyId?: string;
-    chainId?: number;
-    sender?: string;
-    limit?: number;
-  }): Promise<readonly StoredSponsorship[]> {
+  async listSponsorships(
+    query: {
+      apiKeyId?: string;
+      chainId?: number;
+      sender?: string;
+      limit?: number;
+    },
+    context: ActorContext,
+  ): Promise<readonly StoredSponsorship[]> {
     const repo = this.deps.sponsorships;
     if (repo === undefined) throw new AdminUnavailableError();
-    return repo.list({
+    return repo.list(context.scope, {
       ...(query.apiKeyId === undefined ? {} : {apiKeyId: query.apiKeyId}),
       ...(query.chainId === undefined ? {} : {chainId: query.chainId}),
       ...(query.sender === undefined ? {} : {sender: query.sender as Address}),
@@ -213,10 +230,10 @@ export class AdminService {
     });
   }
 
-  async listAudit(query: {actor?: string; action?: string; since?: number; limit?: number}) {
+  async listAudit(query: {actor?: string; action?: string; since?: number; limit?: number}, context: ActorContext) {
     const repo = this.deps.audit;
     if (repo === undefined) throw new AdminUnavailableError();
-    return repo.list(query);
+    return repo.list(context.scope, query);
   }
 
   // ------------------------------------------------------------------------------------------
@@ -235,6 +252,7 @@ export class AdminService {
     // Without a database there is no audit log — and no policy repository either, so every
     // mutating path has already thrown AdminUnavailableError before reaching here.
     await this.deps.audit?.record({
+      ...(context.scope.kind === "tenant" ? {tenantId: context.scope.tenantId} : {}),
       actor: context.actor,
       action,
       subject,

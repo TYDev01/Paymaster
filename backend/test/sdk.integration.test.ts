@@ -28,6 +28,7 @@ import {packUint128Pair, type PackedUserOperation} from "../src/domain/userOpera
 import {deploy, loadArtifact, startAnvil, type AnvilInstance} from "./support/anvil.js";
 import {rundlerAvailable, startBundler, type BundlerInstance} from "./support/bundler.js";
 import {testEnv} from "./support/env.js";
+import {ACME} from "./support/tenants.js";
 
 /**
  * The SDK against the WHOLE platform: SDK -> real backend (sponsor) -> real bundler (send) ->
@@ -215,7 +216,7 @@ describeBundler("SDK drives the whole platform (SDK -> backend -> bundler -> cha
       enabled: true,
     };
     const policySource = new PolicySource({
-      load: async () => [{id: "default", rules: [new ChainEnabledRule([chainId])]}],
+      load: async () => [{tenantId: ACME, id: "default", rules: [new ChainEnabledRule([chainId])]}],
     });
     await policySource.reload();
 
@@ -226,6 +227,7 @@ describeBundler("SDK drives the whole platform (SDK -> backend -> bundler -> cha
       signer: new LocalSponsorshipSigner(signerKey),
       apiKeys: new InMemoryApiKeyStore([
         {
+          tenantId: ACME,
           id: "k",
           name: "sdk",
           hash: keyGen.hash,

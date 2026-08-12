@@ -2,6 +2,7 @@ import type {Policy} from "../policy/engine.js";
 import type {PolicyFactory} from "../policy/policyFactory.js";
 import type {PolicyRepository} from "../policy/policySource.js";
 import type {DatabasePool} from "./pool.js";
+import {scopePredicate, writingTenant, type Scope, type TenantId} from "./scope.js";
 
 export interface PolicyDefinition {
   readonly id: string;
@@ -12,6 +13,7 @@ export interface PolicyDefinition {
 }
 
 export interface StoredPolicy extends PolicyDefinition {
+  readonly tenantId: TenantId;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -43,9 +45,11 @@ export class PostgresPolicyRepository implements PolicyRepository {
    * previous set — so a bad policy row degrades to "stale policy", never to "policy silently
    * missing a rule". See PolicyFactory for why that asymmetry is the safe one.
    */
-  async load(): Promise<readonly Policy[]> {
+  async load(scope: Scope): Promise<readonly Policy[]> {
+    const {sql, params} = scopePredicate(scope, "p.tenant_id");
     const {rows} = await this.pool.query<PolicyRow>(
-      `SELECT p.id,
+      `SELECT p.tenant_id,
+              p.id,
               p.name,
               p.description,
               p.enabled,
@@ -59,22 +63,26 @@ export class PostgresPolicyRepository implements PolicyRepository {
                 '[]'
               ) AS rules
          FROM policies p
-         LEFT JOIN policy_rules r ON r.policy_id = p.id
-        WHERE p.enabled
-        GROUP BY p.id
-        ORDER BY p.id`,
+         LEFT JOIN policy_rules r ON r.tenant_id = p.tenant_id AND r.policy_id = p.id
+        WHERE p.enabled AND ${sql}
+        GROUP BY p.tenant_id, p.id
+        ORDER BY p.tenant_id, p.id`,
+      [...params],
     );
 
     return rows.map((row) => ({
+      tenantId: row.tenant_id as TenantId,
       id: row.id,
       rules: row.rules.map((spec) => this.factory.build(row.id, spec)),
     }));
   }
 
   /** Definitions rather than built rules, for the admin API to display and edit. */
-  async list(): Promise<readonly StoredPolicy[]> {
+  async list(scope: Scope): Promise<readonly StoredPolicy[]> {
+    const {sql, params} = scopePredicate(scope, "p.tenant_id");
     const {rows} = await this.pool.query<PolicyRow>(
-      `SELECT p.id,
+      `SELECT p.tenant_id,
+              p.id,
               p.name,
               p.description,
               p.enabled,
@@ -88,15 +96,24 @@ export class PostgresPolicyRepository implements PolicyRepository {
                 '[]'
               ) AS rules
          FROM policies p
-         LEFT JOIN policy_rules r ON r.policy_id = p.id
-        GROUP BY p.id
-        ORDER BY p.id`,
+         LEFT JOIN policy_rules r ON r.tenant_id = p.tenant_id AND r.policy_id = p.id
+        WHERE ${sql}
+        GROUP BY p.tenant_id, p.id
+        ORDER BY p.tenant_id, p.id`,
+      [...params],
     );
     return rows.map(toStored);
   }
 
-  async get(id: string): Promise<StoredPolicy> {
-    const all = await this.list();
+  /**
+   * One policy, within the scope.
+   *
+   * A policy belonging to another tenant is reported as NOT FOUND rather than as forbidden: telling
+   * a caller that an id exists but is not theirs leaks the existence of another tenant's
+   * configuration, and policy ids are frequently guessable ("default", "production").
+   */
+  async get(scope: Scope, id: string): Promise<StoredPolicy> {
+    const all = await this.list(scope);
     const found = all.find((p) => p.id === id);
     if (found === undefined) throw new PolicyNotFoundError(id);
     return found;
@@ -115,7 +132,9 @@ export class PostgresPolicyRepository implements PolicyRepository {
    * at the next reload — by which point the operator who wrote it is gone and the policy silently
    * stops loading.
    */
-  async upsert(definition: PolicyDefinition): Promise<void> {
+  async upsert(scope: Scope, definition: PolicyDefinition): Promise<void> {
+    const owner = writingTenant(scope, "write a policy");
+
     for (const rule of definition.rules) {
       this.factory.build(definition.id, rule);
     }
@@ -124,23 +143,27 @@ export class PostgresPolicyRepository implements PolicyRepository {
     try {
       await client.query("BEGIN");
 
+      // ON CONFLICT names the composite key, so an id that exists under ANOTHER tenant is an
+      // insert here rather than an update there — which is the entire point of making the id
+      // unique per tenant instead of globally.
       await client.query(
-        `INSERT INTO policies (id, name, description, enabled)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (id) DO UPDATE
+        `INSERT INTO policies (tenant_id, id, name, description, enabled)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (tenant_id, id) DO UPDATE
             SET name = EXCLUDED.name,
                 description = EXCLUDED.description,
                 enabled = EXCLUDED.enabled,
                 updated_at = now()`,
-        [definition.id, definition.name, definition.description ?? null, definition.enabled],
+        [owner, definition.id, definition.name, definition.description ?? null, definition.enabled],
       );
 
-      await client.query("DELETE FROM policy_rules WHERE policy_id = $1", [definition.id]);
+      await client.query("DELETE FROM policy_rules WHERE tenant_id = $1 AND policy_id = $2", [owner, definition.id]);
 
       for (const [ordinal, rule] of definition.rules.entries()) {
         await client.query(
-          `INSERT INTO policy_rules (policy_id, ordinal, rule_type, config) VALUES ($1, $2, $3, $4::jsonb)`,
-          [definition.id, ordinal, rule.ruleType, JSON.stringify(rule.config ?? {})],
+          `INSERT INTO policy_rules (tenant_id, policy_id, ordinal, rule_type, config)
+           VALUES ($1, $2, $3, $4, $5::jsonb)`,
+          [owner, definition.id, ordinal, rule.ruleType, JSON.stringify(rule.config ?? {})],
         );
       }
 
@@ -159,13 +182,15 @@ export class PostgresPolicyRepository implements PolicyRepository {
    * A policy still pinned by an API key fails on the foreign key, deliberately. See the migration:
    * silently unpinning those keys would let them fall back to naming any policy they like.
    */
-  async delete(id: string): Promise<boolean> {
-    const {rowCount} = await this.pool.query("DELETE FROM policies WHERE id = $1", [id]);
+  async delete(scope: Scope, id: string): Promise<boolean> {
+    const owner = writingTenant(scope, "delete a policy");
+    const {rowCount} = await this.pool.query("DELETE FROM policies WHERE tenant_id = $1 AND id = $2", [owner, id]);
     return (rowCount ?? 0) > 0;
   }
 }
 
 interface PolicyRow {
+  tenant_id: string;
   id: string;
   name: string;
   description: string | null;
@@ -177,6 +202,7 @@ interface PolicyRow {
 
 function toStored(row: PolicyRow): StoredPolicy {
   return {
+    tenantId: row.tenant_id as TenantId,
     id: row.id,
     name: row.name,
     description: row.description ?? undefined,

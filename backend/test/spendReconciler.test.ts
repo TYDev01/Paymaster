@@ -16,6 +16,7 @@ import {
   type UserOpEventSource,
   type UserOperationEventRecord,
 } from "../src/reconciliation/spendReconciler.js";
+import {ACME} from "./support/tenants.js";
 
 const SENDER = "0x1234567890123456789012345678901234567890" as Address;
 const CHAIN = 8453;
@@ -64,7 +65,7 @@ async function reservedWalletCap(maxCost: bigint): Promise<{store: InMemoryQuota
 
 function policyLookup(policy: Policy | undefined): PolicyLookup {
   return {
-    get: (id) => {
+    get: (_tenant: unknown, id) => {
       if (policy === undefined || id !== policy.id) throw new UnknownPolicyError(id);
       return policy;
     },
@@ -107,7 +108,14 @@ const OPTS: SpendReconcilerOptions = {
 };
 
 function claim(reservedMaxCostWei: bigint): ClaimedReservation {
-  return {sponsorshipId: 1n, policyId: "p", apiKeyId: "key-1", reservedMaxCostWei, reservedAt: RESERVED_AT};
+  return {
+    sponsorshipId: 1n,
+    tenantId: ACME,
+    policyId: "p",
+    apiKeyId: "key-1",
+    reservedMaxCostWei,
+    reservedAt: RESERVED_AT,
+  };
 }
 
 describe("SpendReconciler", () => {
@@ -115,7 +123,7 @@ describe("SpendReconciler", () => {
     const reservedMax = 10n ** 15n; // reserved worst case
     const actual = 4n * 10n ** 14n; // realised cost, lower
     const {store, rule, key} = await reservedWalletCap(reservedMax);
-    const policy: Policy = {id: "p", rules: [rule]};
+    const policy: Policy = {tenantId: ACME, id: "p", rules: [rule]};
 
     // Before reconciliation the counter holds the full worst-case reservation, in gwei.
     expect(await store.usage(key, WINDOW, RESERVED_AT)).toBe(reservedMax / GWEI);
@@ -138,7 +146,7 @@ describe("SpendReconciler", () => {
     const reservedMax = 10n ** 15n;
     const actual = 4n * 10n ** 14n;
     const {store, rule, key} = await reservedWalletCap(reservedMax);
-    const policy: Policy = {id: "p", rules: [rule]};
+    const policy: Policy = {tenantId: ACME, id: "p", rules: [rule]};
     const st = fakeStore([claim(reservedMax)]); // only one claim available, ever
 
     const reconciler = new SpendReconciler(
@@ -170,7 +178,7 @@ describe("SpendReconciler", () => {
     const reconciler = new SpendReconciler(
       source(100n, [event(), event({nonce: 8n})]),
       fakeStore([]), // claim always returns undefined
-      policyLookup({id: "p", rules: [rule]}),
+      policyLookup({tenantId: ACME, id: "p", rules: [rule]}),
       OPTS,
     );
     const [stats] = await reconciler.reconcileAll();
@@ -179,7 +187,12 @@ describe("SpendReconciler", () => {
 
   it("stays behind the head by the confirmation depth", async () => {
     const st = fakeStore([]);
-    const reconciler = new SpendReconciler(source(3n, []), st, policyLookup({id: "p", rules: []}), OPTS);
+    const reconciler = new SpendReconciler(
+      source(3n, []),
+      st,
+      policyLookup({tenantId: ACME, id: "p", rules: []}),
+      OPTS,
+    );
     // latest 3, confirmations 5 => safeHead negative => nothing to scan, no checkpoint written.
     const result = await reconciler.reconcileChain(CHAIN);
     expect(result).toBeUndefined();
@@ -197,7 +210,10 @@ describe("SpendReconciler", () => {
     };
     const st = fakeStore([]);
     await st.saveCheckpoint(CHAIN, 100n);
-    const reconciler = new SpendReconciler(src, st, policyLookup({id: "p", rules: []}), {...OPTS, maxBlockRange: 500});
+    const reconciler = new SpendReconciler(src, st, policyLookup({tenantId: ACME, id: "p", rules: []}), {
+      ...OPTS,
+      maxBlockRange: 500,
+    });
     await reconciler.reconcileChain(CHAIN);
     // from = checkpoint+1 = 101; to = min(safeHead=9995, 101+500-1=600) = 600.
     expect(scanned).toEqual({from: 101n, to: 600n});
@@ -220,7 +236,7 @@ describe("SpendReconciler", () => {
     const reconciler = new SpendReconciler(
       source(100n, [event()]),
       fakeStore([claim(10n ** 15n)]),
-      policyLookup({id: "p", rules: [opsRule]}),
+      policyLookup({tenantId: ACME, id: "p", rules: [opsRule]}),
       OPTS,
     );
     await reconciler.reconcileAll();

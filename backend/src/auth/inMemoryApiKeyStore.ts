@@ -1,4 +1,5 @@
 import type {ApiKeyRecord, ApiKeyStore} from "./apiKeyStore.js";
+import {isPlatform, writingTenant, type Scope} from "../db/scope.js";
 
 /**
  * API key store held in process memory.
@@ -19,7 +20,10 @@ export class InMemoryApiKeyStore implements ApiKeyStore {
     return this.#byHash.get(hash);
   }
 
-  async create(record: ApiKeyRecord): Promise<void> {
+  async create(scope: Scope, input: Omit<ApiKeyRecord, "tenantId">): Promise<void> {
+    // The tenant comes from the scope, exactly as in the SQL store — the two implementations must
+    // agree on this or the in-memory deployment would have a weaker boundary than the real one.
+    const record: ApiKeyRecord = {...input, tenantId: writingTenant(scope, "create an api key")};
     if (this.#byId.has(record.id)) throw new Error(`api key ${record.id} already exists`);
     // A hash collision here means the same secret was issued twice, which a CSPRNG makes
     // impossible — but if it ever happened, silently overwriting would orphan the first key.
@@ -27,15 +31,22 @@ export class InMemoryApiKeyStore implements ApiKeyStore {
     this.#index(record);
   }
 
-  async revoke(id: string, _now: number): Promise<boolean> {
+  async revoke(scope: Scope, id: string, _now: number): Promise<boolean> {
     const record = this.#byId.get(id);
     if (record === undefined || !record.enabled) return false;
+    // Indistinguishable from "already revoked", for the same reason as the SQL store: a different
+    // answer for another tenant's id would let one tenant probe for another's key ids.
+    if (!this.#inScope(scope, record)) return false;
     this.#index({...record, enabled: false});
     return true;
   }
 
-  async list(): Promise<readonly ApiKeyRecord[]> {
-    return [...this.#byId.values()];
+  async list(scope: Scope): Promise<readonly ApiKeyRecord[]> {
+    return [...this.#byId.values()].filter((record) => this.#inScope(scope, record));
+  }
+
+  #inScope(scope: Scope, record: ApiKeyRecord): boolean {
+    return isPlatform(scope) || record.tenantId === scope.tenantId;
   }
 
   async touch(id: string, now: number): Promise<void> {

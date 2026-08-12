@@ -1,9 +1,18 @@
 import {hashApiKey, isWellFormedApiKey} from "./apiKey.js";
 import {ThrottledLastUsedTracker, type ApiKeyStore} from "./apiKeyStore.js";
 import {permissionsFor, type Permission, type Role} from "./permissions.js";
+import type {TenantId} from "../db/scope.js";
 
 /** An authenticated caller. Everything downstream reads identity from here, never from headers. */
 export interface Principal {
+  /**
+   * The tenant this caller belongs to.
+   *
+   * Established by the key lookup and carried everywhere downstream: it decides which policy set
+   * the request is evaluated against and which tenant's balance pays. Every authenticated request
+   * therefore has a tenant, and there is no code path that produces a principal without one.
+   */
+  readonly tenantId: TenantId;
   readonly apiKeyId: string;
   readonly name: string;
   readonly roles: readonly Role[];
@@ -57,6 +66,7 @@ export class ApiKeyAuthenticator {
     }
 
     const principal: Principal = {
+      tenantId: record.tenantId,
       apiKeyId: record.id,
       name: record.name,
       roles: record.roles,

@@ -5,6 +5,7 @@ import {ThrottledLastUsedTracker, type ApiKeyRecord} from "../src/auth/apiKeySto
 import {ApiKeyAuthenticator, extractApiKey, type AuthObserver} from "../src/auth/authenticator.js";
 import {InMemoryApiKeyStore} from "../src/auth/inMemoryApiKeyStore.js";
 import {permissionsFor, ROLES, isRole} from "../src/auth/permissions.js";
+import {ACME, ACME_SCOPE} from "./support/tenants.js";
 
 const NOW = 1_700_000_000;
 
@@ -13,6 +14,7 @@ function record(over: Partial<ApiKeyRecord> = {}): {record: ApiKeyRecord; secret
   return {
     secret: generated.secret,
     record: {
+      tenantId: ACME,
       id: "k1",
       name: "test key",
       hash: generated.hash,
@@ -185,7 +187,7 @@ describe("ApiKeyAuthenticator", () => {
 
     await auth.authenticate(secret, NOW);
     await vi.waitFor(async () => {
-      expect((await store.list())[0]!.lastUsedAt).toBe(NOW);
+      expect((await store.list(ACME_SCOPE))[0]!.lastUsedAt).toBe(NOW);
     });
   });
 
@@ -260,28 +262,28 @@ describe("InMemoryApiKeyStore", () => {
     const store = new InMemoryApiKeyStore([r]);
 
     expect(await store.findByHash(hashApiKey(secret))).toMatchObject({id: "k1"});
-    expect(await store.revoke("k1", NOW)).toBe(true);
+    expect(await store.revoke(ACME_SCOPE, "k1", NOW)).toBe(true);
     expect((await store.findByHash(hashApiKey(secret)))!.enabled).toBe(false);
   });
 
   it("revoking twice reports no change the second time", async () => {
     const {record: r} = record();
     const store = new InMemoryApiKeyStore([r]);
-    expect(await store.revoke("k1", NOW)).toBe(true);
-    expect(await store.revoke("k1", NOW)).toBe(false);
+    expect(await store.revoke(ACME_SCOPE, "k1", NOW)).toBe(true);
+    expect(await store.revoke(ACME_SCOPE, "k1", NOW)).toBe(false);
   });
 
   it("rejects a duplicate id", async () => {
     const {record: r} = record();
     const store = new InMemoryApiKeyStore([r]);
-    await expect(store.create({...r, hash: "other"})).rejects.toThrow(/already exists/);
+    await expect(store.create(ACME_SCOPE, {...r, hash: "other"})).rejects.toThrow(/already exists/);
   });
 
   it("stores no recoverable credential", async () => {
     const {record: r, secret} = record();
     const store = new InMemoryApiKeyStore([r]);
     // A dump of everything the store holds must not contain the key.
-    expect(JSON.stringify(await store.list())).not.toContain(secret.slice(8));
+    expect(JSON.stringify(await store.list(ACME_SCOPE))).not.toContain(secret.slice(8));
   });
 });
 

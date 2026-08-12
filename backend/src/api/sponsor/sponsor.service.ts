@@ -3,6 +3,7 @@ import {slice, toHex, type Address, type Hex} from "viem";
 import {calculateMaxCost} from "../../chain/gas.js";
 import type {ChainRegistry} from "../../chain/chainRegistry.js";
 import {noopTracer, withSpan, type Span, type Tracer} from "../../monitoring/tracing.js";
+import type {TenantId} from "../../db/scope.js";
 import {decodeCallTargets} from "../../policy/callData.js";
 import type {PolicyContext, PolicyDenial} from "../../policy/context.js";
 import type {PolicyEngine} from "../../policy/engine.js";
@@ -46,6 +47,7 @@ export interface SponsorshipRecorder {
     nonce: bigint;
     paymaster: Address;
     entryPoint: Address;
+    tenantId: TenantId;
     apiKeyId: string;
     policyId: string;
     signer: Address;
@@ -100,7 +102,7 @@ export class SponsorService {
    * the amount committed, is what makes a slow or denied request answerable from a trace alone. The
    * span joins the HTTP server span above it through the ambient context, so no plumbing is needed.
    */
-  async sponsor(request: SponsorRequest, caller: CallerIdentity = {}): Promise<SponsorResponse> {
+  async sponsor(request: SponsorRequest, caller: CallerIdentity): Promise<SponsorResponse> {
     return withSpan(
       this.#deps.tracer ?? noopTracer,
       "sponsor",
@@ -119,7 +121,10 @@ export class SponsorService {
     // Throws UnknownChainError / ChainDisabledError, which the filter maps to 4xx.
     const chain = chains.get(request.chainId);
     const policyId = request.policyId ?? options.defaultPolicyId;
-    const policy = policies.get(policyId);
+    // Resolved within the CALLER'S tenant. Two tenants may both have a policy called "default",
+    // and serving one tenant the other's rules is the failure this whole boundary exists to make
+    // impossible — so the tenant is required here, not defaulted.
+    const policy = policies.get(caller.tenantId, policyId);
     span.setAttribute("paymaster.policy_id", policyId);
 
     const userOp = toPackedUserOperation(request.userOperation);
@@ -186,6 +191,7 @@ export class SponsorService {
        */
       await this.#deps.sponsorships?.record({
         chainId: request.chainId,
+        tenantId: caller.tenantId,
         sender: request.userOperation.sender,
         nonce: request.userOperation.nonce,
         paymaster: chain.config.paymaster,
@@ -231,6 +237,11 @@ export class SponsorService {
 }
 
 export interface CallerIdentity {
+  /**
+   * Whose request this is. Required — every sponsorship belongs to a tenant, and there is no
+   * anonymous sponsorship: the policy set, the spend caps and (later) the balance are all theirs.
+   */
+  readonly tenantId: TenantId;
   readonly clientIp?: string | undefined;
   readonly apiKeyId?: string | undefined;
 }

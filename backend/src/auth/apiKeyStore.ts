@@ -1,10 +1,17 @@
 import type {Role} from "./permissions.js";
+import type {Scope, TenantId} from "../db/scope.js";
 
 /**
  * A key as stored. Contains no recoverable credential — only the hash.
  */
 export interface ApiKeyRecord {
   readonly id: string;
+  /**
+   * The tenant this key belongs to. Established when the key is looked up, and carried into the
+   * principal — this is the point where an anonymous HTTP request becomes attributable to a
+   * customer, so everything downstream can be scoped from it.
+   */
+  readonly tenantId: TenantId;
   /** Human label, for the admin list. Not used in authorisation. */
   readonly name: string;
   readonly hash: string;
@@ -28,9 +35,17 @@ export interface ApiKeyStore {
    */
   findByHash(hash: string): Promise<ApiKeyRecord | undefined>;
 
-  create(record: ApiKeyRecord): Promise<void>;
-  revoke(id: string, now: number): Promise<boolean>;
-  list(): Promise<readonly ApiKeyRecord[]>;
+  /**
+   * Administrative reads and writes, always scoped.
+   *
+   * `findByHash` above is deliberately NOT scoped: it is the request path, and at that moment the
+   * caller's tenant is unknown — the key is what establishes it. These, by contrast, are called
+   * from an already-authenticated context, so the scope is known and must be applied, or one
+   * tenant can list and revoke another's credentials.
+   */
+  create(scope: Scope, record: Omit<ApiKeyRecord, "tenantId">): Promise<void>;
+  revoke(scope: Scope, id: string, now: number): Promise<boolean>;
+  list(scope: Scope): Promise<readonly ApiKeyRecord[]>;
 
   /**
    * Records that a key was used.

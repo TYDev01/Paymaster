@@ -1,6 +1,7 @@
 import {createHmac, timingSafeEqual} from "node:crypto";
 
 import {isRole, type Role} from "./permissions.js";
+import {TENANT_ID_PATTERN} from "../db/scope.js";
 
 /**
  * Short-lived operator session tokens (HS256 JWTs).
@@ -19,6 +20,14 @@ import {isRole, type Role} from "./permissions.js";
 export interface JwtClaims {
   /** Subject: the api key id this session was minted for. Becomes `Principal.apiKeyId`. */
   readonly sub: string;
+  /**
+   * The tenant the session acts within, copied from the key it was exchanged for.
+   *
+   * In the claims rather than looked up on each request, so a session cannot outlive its tenant
+   * association — and so a token minted for one tenant can never be replayed against another, since
+   * the tenant is inside the signed payload.
+   */
+  readonly tenantId: string;
   readonly name: string;
   readonly roles: readonly Role[];
   /** The policy the caller's key pins, if any. Carried through so a session behaves like the key. */
@@ -60,6 +69,7 @@ export class JwtService {
       iss: this.#options.issuer,
       aud: this.#options.audience,
       sub: claims.sub,
+      tenantId: claims.tenantId,
       name: claims.name,
       roles: claims.roles,
       ...(claims.policyId === undefined ? {} : {policyId: claims.policyId}),
@@ -98,6 +108,7 @@ export class JwtService {
     const name = payload["name"];
     const roles = payload["roles"];
     const policyId = payload["policyId"];
+    const claimedTenant = payload["tenantId"];
 
     if (iss !== this.#options.issuer) return fail("wrong-issuer");
     if (aud !== this.#options.audience) return fail("wrong-audience");
@@ -107,6 +118,9 @@ export class JwtService {
     if (typeof sub !== "string" || typeof name !== "string" || !Array.isArray(roles)) {
       return fail("bad-claims");
     }
+    // A token without a tenant is rejected rather than defaulted. Defaulting would silently give an
+    // old session — one minted before tenants existed — access to the default tenant's data.
+    if (typeof claimedTenant !== "string" || !TENANT_ID_PATTERN.test(claimedTenant)) return fail("bad-claims");
     // Every role must be known: an unknown role in a token must not silently grant nothing (which
     // could bypass a check that expects a role) nor be trusted. Reject the token outright.
     if (!roles.every((r: unknown): r is Role => typeof r === "string" && isRole(r))) return fail("bad-claims");
@@ -115,6 +129,7 @@ export class JwtService {
       ok: true,
       claims: {
         sub,
+        tenantId: claimedTenant,
         name,
         roles: roles as Role[],
         policyId: typeof policyId === "string" ? policyId : undefined,
