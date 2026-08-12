@@ -29,6 +29,9 @@ const ALLOWED = {
   keys: {path: "/admin/keys", key: "keys"},
   sponsorships: {path: "/admin/sponsorships", key: "sponsorships"},
   audit: {path: "/admin/audit", key: "entries"},
+  // Per-tenant balances and the key to fund them with. Scoped by the backend to the tenant that
+  // owns the admin credential this server holds — it cannot return anyone else's.
+  funding: {path: "/admin/funding", key: "funding"},
 } as const;
 
 type Resource = keyof typeof ALLOWED;
