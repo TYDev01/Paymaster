@@ -40,20 +40,30 @@ jobs:
       - name: Run Forge tests
         run: forge test -vvv
 
-      # The paymaster is 100% covered on lines, statements, branches and functions, so the floor is
-      # set at 100 and any new uncovered path fails the build. Scripts and tests are excluded — the
-      # deploy script is covered by its own suite, but a coverage percentage over a script is not a
-      # meaningful number.
+      # Every contract under src/ is 100% covered on lines, statements, branches and functions, so
+      # the floor is set at 100 and any new uncovered path fails the build. Scripts and tests are
+      # excluded — the deploy script is covered by its own suite, but a coverage percentage over a
+      # script is not a meaningful number.
+      #
+      # The check walks every src/ row rather than naming files. An earlier version grepped for
+      # VerifyingPaymaster.sol specifically, which meant TenantPaymaster.sol was added and sat at
+      # 77% with the build green: a gate that names its subjects only guards the ones someone
+      # remembered to add.
       - name: Check contract coverage
         run: |
           forge coverage --no-match-coverage "(test|script)" --report summary | tee coverage.txt
           python3 - <<'PY'
           import re, sys
-          row = next(l for l in open("coverage.txt") if "VerifyingPaymaster.sol" in l)
-          percentages = [float(p) for p in re.findall(r"(\d+\.\d+)%", row)]
-          if not percentages or min(percentages) < 100.0:
-              sys.exit(f"contract coverage regressed below 100%: {row.strip()}")
-          print("contract coverage: 100% across lines, statements, branches and functions")
+          rows = [l for l in open("coverage.txt") if re.match(r"\|\s*src/", l)]
+          if not rows:
+              sys.exit("no src/ rows in the coverage summary: the report format changed")
+          failed = [
+              r.strip() for r in rows
+              if min([float(p) for p in re.findall(r"(\d+\.\d+)%", r)] or [0.0]) < 100.0
+          ]
+          if failed:
+              sys.exit("contract coverage below 100%:\n" + "\n".join(failed))
+          print(f"{len(rows)} contracts at 100% across lines, statements, branches and functions")
           PY
 
       - name: Verify the deploy scripts parse

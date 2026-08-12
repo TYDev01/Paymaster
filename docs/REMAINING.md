@@ -177,7 +177,16 @@ In dependency order — each item needs the ones above it.
    Platform reads and writes are also separated: `platform:read` widens READS to every tenant and
    never widens writes, which stay bound to the holder's own tenant. Seeing every customer is a
    support requirement; editing their account from the same credential is not.
-5. **A credit ledger.** The hard part, and the one that decides the product.
+5. **A credit ledger.** ⚠️ The on-chain half is built (`TenantPaymaster`, see below); the backend
+   still signs against the old single-tenant contract, so nothing debits a tenant balance yet.
+
+   The paragraph below is kept as written because it describes the shape the backend still has to
+   grow. One line of it is now wrong and worth flagging rather than quietly editing: it concluded
+   that per-tenant on-chain deposits were impractical and that the ledger had to be off chain. The
+   stake analysis further down shows why that is only true of a CONTRACT per tenant — a balance per
+   tenant inside one staked contract has the same isolation without the stake multiplier, and that
+   is what shipped. The ledger is therefore on chain, and the off-chain records are a mirror of it
+   rather than the source of truth.
 
    The chain gives us one deposit per paymaster address, so per-tenant on-chain deposits would mean
    a paymaster contract per tenant — expensive to deploy, stake and monitor, and it multiplies the
@@ -230,9 +239,12 @@ The genuinely new work is the tenant boundary, the balance itself, and billing.
 - **Funds are per tenant, held on chain.** A tenant's balance is theirs, not a line in our ledger
   that we could get wrong. See the open question below on how that is implemented.
 
-### Open: per-tenant paymaster, or per-tenant balance inside one paymaster
+### ✅ Settled: per-tenant balance inside one paymaster — BUILT
 
-The instinct — each tenant's money is theirs and visibly separate — is right. The question is
+`contracts/src/TenantPaymaster.sol` is the answer to the question below, and it is written and
+tested. The reasoning is kept because it is the argument for the shape, not a decision still pending.
+
+The instinct — each tenant's money is theirs and visibly separate — is right. The question was
 whether "their own vault" means their own CONTRACT.
 
 **Stake is the constraint.** `EntryPoint.deposits` is `mapping(address => DepositInfo)`, so stake is
@@ -274,11 +286,35 @@ facts are enforced by the chain rather than by our bookkeeping.
 opt-in** for a tenant large enough to want their own reputation and pause switch and to fund their
 own stake. That is the same factory, used for the exception rather than the default.
 
-**The implementation cost to be aware of either way:** the paymaster currently returns an empty
+**The implementation cost to be aware of either way:** `VerifyingPaymaster` returns an empty
 context, so the EntryPoint never calls `postOp` at all — deliberately, because a verifying paymaster
 has nothing to settle after execution. Debiting a balance on chain means reserving `maxCost` during
 validation and refunding the difference in `postOp`, which brings that call back and adds gas to
 every sponsored operation. That is the price of the chain enforcing the accounting instead of us.
+
+**What was built.** `TenantPaymaster` is a second contract rather than a mode flag on the first, so
+a single-tenant deployment does not pay for accounting it does not need. It adds a 32-byte tenant
+field to `paymasterAndData` at `[64:96]` and to the EIP-712 struct, which is what stops an
+attestation for one tenant being replayed against another's balance. `validatePaymasterUserOp`
+reserves `maxCost` and `postOp` refunds the unused part.
+
+One accounting subtlety is worth knowing before reading the code: `actualGasCost` excludes the gas
+the EntryPoint is about to charge for `postOp` itself, because that gas is still being spent as the
+number is computed. Refunding `reserved - actualGasCost` would therefore hand back money the
+EntryPoint then takes from the deposit, and `sum(balances)` would creep above the deposit one
+operation at a time. So the charge assumes `postOp` uses its full limit — slightly over-charging the
+tenant, by the unused part of a limit the tenant chose, and erring in the only direction that stays
+solvent.
+
+`sum(balances) <= entryPoint.balanceOf(paymaster)` is asserted by a Foundry invariant suite driving
+real operations through a real EntryPoint, not argued for. That suite has an `afterInvariant` guard
+asserting at least one sponsorship actually landed in each run: the first version of it had every
+one of its 16,384 calls refused for insufficient balance and passed all three invariants while
+exercising none of the spending path.
+
+Still open: **the opt-in dedicated paymaster** for a tenant large enough to fund its own stake, and
+**`setController` is owner-only**, so a customer's ability to withdraw their own balance is granted
+by the platform per tenant rather than derived on chain from who funded it.
 
 ---
 
