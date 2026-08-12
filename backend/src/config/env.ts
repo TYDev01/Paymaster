@@ -114,6 +114,30 @@ export const envSchema = z
     RECONCILER_INITIAL_LOOKBACK_BLOCKS: z.coerce.number().int().min(0).max(10_000_000).default(5_000),
 
     /**
+     * Dashboard sign-in through Privy.
+     *
+     * When PRIVY_APP_ID is set (and ADMIN_JWT_SECRET, which signs the resulting session), a person
+     * can exchange a Privy token for a tenant-scoped session at /auth/session. Unset, the endpoints
+     * report 503 and the deployment is the single-tenant operator setup it has always been.
+     *
+     * The app id is not a secret — it identifies the application a token was minted for, and the
+     * audience check is what stops a token from another Privy app authenticating here.
+     */
+    PRIVY_APP_ID: z.string().min(1).optional(),
+    /** JWKS endpoint. Defaults to Privy's for the app id; overridable for testing or a proxy. */
+    PRIVY_JWKS_URL: z.string().url().optional(),
+    PRIVY_ISSUER: z.string().min(1).default("privy.io"),
+    PRIVY_JWKS_CACHE_MS: z.coerce.number().int().min(1_000).max(86_400_000).default(600_000),
+
+    /**
+     * Whether an unknown person may create their own tenant on first sign-in.
+     *
+     * Off by default: every visitor with a Privy account could otherwise create rows, which is a
+     * product decision with an abuse dimension rather than a default to inherit.
+     */
+    TENANT_SELF_SIGNUP: boolFromEnv(false),
+
+    /**
      * Seeds the bootstrap policy into an EMPTY policy table, solving the same chicken-and-egg
      * BOOTSTRAP_API_KEY solves for credentials: with a database configured, policies come from it,
      * and a fresh database has none — so every sponsorship fails naming a policy nobody was told to

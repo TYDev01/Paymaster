@@ -47,6 +47,10 @@ import {parseChainsJson, parseOtlpHeaders, type Env} from "../config/env.js";
 import {DEFAULT_TENANT_ID, forTenant, PLATFORM_SCOPE} from "../db/scope.js";
 import {API_KEY_AUTHENTICATOR, JWT_VERIFIER, SECURITY_IP_THROTTLE} from "./guards/apiKey.guard.js";
 import {AuthController} from "./admin/auth.controller.js";
+import {TenantAuthController, TENANT_SESSION_SERVICE} from "./admin/tenantAuth.controller.js";
+import {TenantSessionService} from "../auth/tenantSession.js";
+import {PrivyIdentityProvider} from "../auth/privyIdentityProvider.js";
+import {TenantRepository} from "../db/tenantRepository.js";
 import {HealthController, HEALTH_DEPS, type HealthDeps} from "./health/health.controller.js";
 import {MetricsController, PAYMASTER_METRICS} from "./health/metrics.controller.js";
 import {PaymasterMetrics} from "../monitoring/paymasterMetrics.js";
@@ -88,6 +92,8 @@ export interface AppDependencies {
   readonly tracer?: Tracer | undefined;
   /** Announces policy changes to the other replicas. No-op without Redis (single replica). */
   readonly policyBroadcast?: PolicyBroadcast | undefined;
+  /** Exchanges an identity-provider token for a tenant-scoped session. Absent without Privy. */
+  readonly tenantSessions?: TenantSessionService | undefined;
   readonly env: Env;
 }
 
@@ -139,6 +145,7 @@ export class AppModule {
       {provide: JWT_VERIFIER, useValue: deps.jwt ?? null},
       {provide: SECURITY_IP_THROTTLE, useValue: deps.ipThrottle ?? null},
       {provide: PAYMASTER_METRICS, useValue: metrics ?? null},
+      {provide: TENANT_SESSION_SERVICE, useValue: deps.tenantSessions ?? null},
     ];
 
     // Registered as a value provider so Nest drives its start/stop from the app lifecycle. Only
@@ -152,7 +159,14 @@ export class AppModule {
 
     return {
       module: AppModule,
-      controllers: [SponsorController, HealthController, MetricsController, AdminController, AuthController],
+      controllers: [
+        SponsorController,
+        HealthController,
+        MetricsController,
+        AdminController,
+        AuthController,
+        TenantAuthController,
+      ],
       providers,
     };
   }
@@ -298,9 +312,28 @@ export async function buildDependencies(
           maxSkewSeconds: env.REQUEST_SIGNING_MAX_SKEW_SECONDS,
         });
 
+  // Dashboard sign-in needs three things: a provider to verify the person, somewhere to look up
+  // what they may act within, and a signer for the session. Missing any one of them disables it,
+  // and the endpoints say so rather than half-working.
+  const tenantSessions =
+    env.PRIVY_APP_ID === undefined || pool === undefined || jwt === undefined
+      ? undefined
+      : new TenantSessionService(
+          new PrivyIdentityProvider({
+            appId: env.PRIVY_APP_ID,
+            jwksUrl: env.PRIVY_JWKS_URL,
+            issuer: env.PRIVY_ISSUER,
+            cacheTtlMs: env.PRIVY_JWKS_CACHE_MS,
+          }),
+          new TenantRepository(pool),
+          jwt,
+          {allowSelfSignup: env.TENANT_SELF_SIGNUP},
+        );
+
   return {
     chains,
     policies: policySource,
+    tenantSessions,
     backgroundServices,
     metrics,
     tracer,

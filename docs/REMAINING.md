@@ -126,16 +126,41 @@ In dependency order — each item needs the ones above it.
    can remove the platform's signer and brick their own sponsorship, or withdraw the stake, so
    "owner" has to be split into platform-controlled signer management and tenant-controlled
    withdrawal rather than a single `Ownable`.
-2. **Authentication for humans.** *(next)* The current auth is machine-to-machine: API keys, plus optional
+2. ✅ **Authentication for humans — BUILT.** `IdentityProvider` is a port; `PrivyIdentityProvider`
+   verifies Privy's ES256 access tokens against the app's published JWKS, and `TenantSessionService`
+   exchanges a verified person for a session scoped to ONE tenant they are a member of.
+
+   The exchange is three steps that deliberately cannot collapse into one: the provider says *who*
+   someone is, `tenant_members` says *which tenants* that person may act within, and the session is
+   minted for one of them with the role that membership grants. A compromised provider could
+   therefore impersonate a person but could not grant itself access to a tenant that person does not
+   belong to — naming a tenant is a request, never a grant.
+
+   Endpoints: `POST /auth/tenants` (which organisations am I in), `POST /auth/session` (exchange),
+   `POST /auth/signup` (create one, off unless `TENANT_SELF_SIGNUP`). Every failure returns the same
+   401 body, so the response cannot be used to enumerate tenants.
+
+   **No human session ever gets `sponsor`.** Owners and admins map to `admin`, members to `viewer`.
+   A dashboard login must not be able to spend the tenant's balance — that is what an API key held
+   by their server is for — so a stolen session can read and configure but never drain.
+
+   Verification is hand-rolled for the same reason the operator JWT is, and tested against real
+   ES256 signatures rather than a stub: the likeliest bug is cryptographic. A JWS carries the raw
+   `r||s` pair rather than DER, so Node needs `dsaEncoding: "ieee-p1363"` — get it wrong and every
+   valid token is rejected. The suite covers tampering, `alg:none`, a token minted for another Privy
+   app, key rotation, an unreachable provider, and that unknown `kid`s cannot be used to turn this
+   service into a request amplifier against Privy.
+
+3. **Self-service key issuance.** *(next)* The current auth is machine-to-machine: API keys, plus optional
    operator JWTs. Privy would sit in front as the human identity provider (social login + embedded
    wallet), exchanged for a session bound to a tenant. The existing `JwtService` is a reasonable
    place for that session to land; the API-key path stays exactly as it is for the dApp's server.
-3. **Self-service key issuance.** Keys are currently minted by an operator holding `key:write`, and
+4. **Self-service key issuance.** Keys are currently minted by an operator holding `key:write`, and
    the roles (`sponsor`/`viewer`/`admin`) are operator-shaped. A tenant needs to mint keys scoped to
    its OWN tenant and nothing else, which means a new role and — critically — tenant scoping
    enforced in the store, not in the controller. A missing `WHERE tenant_id = $1` in one query is a
    cross-tenant data leak.
-4. **A credit ledger.** The hard part, and the one that decides the product.
+5. **A credit ledger.** The hard part, and the one that decides the product.
 
    The chain gives us one deposit per paymaster address, so per-tenant on-chain deposits would mean
    a paymaster contract per tenant — expensive to deploy, stake and monitor, and it multiplies the
@@ -148,12 +173,12 @@ In dependency order — each item needs the ones above it.
      the same two-phase shape the spend caps already use;
    - a tenant at zero must be refused **fail-closed**, because past zero the operator is paying;
    - the ledger must reconcile against the on-chain deposit, or slow drift becomes unexplained loss.
-5. **Billing.** Usage metering, a pricing model (gas at cost plus margin, or a subscription), an
+6. **Billing.** Usage metering, a pricing model (gas at cost plus margin, or a subscription), an
    invoice, and a payment rail. Also the operational question of what happens when a card fails
    while operations are in flight.
-6. **Tenant-scoped policy.** Today a policy is global and edited by the operator. A tenant needs to
+7. **Tenant-scoped policy.** Today a policy is global and edited by the operator. A tenant needs to
    edit its own policy, bounded by platform limits it cannot raise — nested limits, not a flat set.
-7. **The frontend for all of it.** Signup, org management, keys, funding, usage, invoices. The
+8. **The frontend for all of it.** Signup, org management, keys, funding, usage, invoices. The
    current console is an OPERATOR view and read-only by design; this is a second, tenant-facing
    surface with write paths and wallet connection.
 
