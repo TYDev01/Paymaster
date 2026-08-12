@@ -155,11 +155,28 @@ In dependency order — each item needs the ones above it.
    operator JWTs. Privy would sit in front as the human identity provider (social login + embedded
    wallet), exchanged for a session bound to a tenant. The existing `JwtService` is a reasonable
    place for that session to land; the API-key path stays exactly as it is for the dApp's server.
-4. **Self-service key issuance.** Keys are currently minted by an operator holding `key:write`, and
-   the roles (`sponsor`/`viewer`/`admin`) are operator-shaped. A tenant needs to mint keys scoped to
-   its OWN tenant and nothing else, which means a new role and — critically — tenant scoping
-   enforced in the store, not in the controller. A missing `WHERE tenant_id = $1` in one query is a
-   cross-tenant data leak.
+3. ✅ **Self-service key issuance — BUILT.** A customer signs in, mints keys inside their own
+   account, and cannot reach anyone else's. Two rules make that safe, and both were missing:
+
+   * **No privilege escalation.** A caller may only grant permissions it holds, checked against the
+     PERMISSIONS a role would confer rather than the role's name — a role that gains a permission
+     later must not become an escalation without this code changing. The one exception is
+     `sponsor:create`, because issuing a spending credential is the entire product; nothing else is
+     delegatable, since every other permission is authority over the account.
+   * **`platform` is unmintable.** The operator's cross-tenant read is a role whose permission no
+     tenant session holds, so the escalation rule puts it out of reach. It can only arrive by
+     seeding or by an operator writing the row.
+
+   Building this found a real hole in what the previous slice claimed. A dashboard session was given
+   the `admin` role, and `admin` contains `sponsor:create` — so the session could spend the tenant's
+   balance directly, despite the comment saying it could not. The earlier test asserted the role
+   NAMED "sponsor" was absent, which was true and meaningless. Sessions now carry `tenant_admin`
+   (everything `admin` has except spending and `chain:write`), the test asserts on permissions, and
+   a customer can still mint a key that spends through the delegation exception.
+
+   Platform reads and writes are also separated: `platform:read` widens READS to every tenant and
+   never widens writes, which stay bound to the holder's own tenant. Seeing every customer is a
+   support requirement; editing their account from the same credential is not.
 5. **A credit ledger.** The hard part, and the one that decides the product.
 
    The chain gives us one deposit per paymaster address, so per-tenant on-chain deposits would mean

@@ -7,7 +7,7 @@ import {UnknownPolicyError} from "../../policy/policySource.js";
 import {InvalidSponsorshipRequestError} from "../../signature/signatureEngine.js";
 import {InvalidRuleConfigError} from "../../policy/policyFactory.js";
 import {PolicyNotFoundError} from "../../db/postgresPolicyRepository.js";
-import {AdminUnavailableError, PolicyInUseError} from "../admin/admin.service.js";
+import {AdminUnavailableError, PolicyInUseError, RoleEscalationError} from "../admin/admin.service.js";
 import {SponsorshipDeniedError} from "../sponsor/sponsor.service.js";
 
 /**
@@ -102,6 +102,17 @@ export class DomainErrorFilter implements ExceptionFilter {
       return {
         status: HttpStatus.CONFLICT,
         body: {error: "POLICY_IN_USE", message: exception.message},
+        logLevel: "warn",
+      };
+    }
+
+    // 403, not 400: the request is well-formed and the caller is authenticated. What they asked for
+    // is simply more than they hold, and naming the excess permissions tells them how to fix it
+    // without revealing anything they could not already read from their own key.
+    if (exception instanceof RoleEscalationError) {
+      return {
+        status: HttpStatus.FORBIDDEN,
+        body: {error: "ROLE_ESCALATION", message: exception.message},
         logLevel: "warn",
       };
     }

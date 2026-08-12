@@ -3,6 +3,7 @@ import {afterAll, beforeAll, beforeEach, describe, expect, it} from "vitest";
 import type {IdentityProvider, IdentityResult} from "../src/auth/identity.js";
 import {JwtService} from "../src/auth/jwt.js";
 import {rolesFor, TenantSessionService} from "../src/auth/tenantSession.js";
+import {permissionsFor} from "../src/auth/permissions.js";
 import {migrate} from "../src/db/migrate.js";
 import {TenantRepository} from "../src/db/tenantRepository.js";
 import {tenantId} from "../src/db/scope.js";
@@ -168,18 +169,31 @@ describe("tenant sessions", () => {
   });
 
   describe("what a human session may do", () => {
-    it("never grants sponsor, at any tenant role", () => {
-      // A dashboard login must not be able to spend the tenant's balance. That is what an API key
-      // is for, held by their server — so a stolen session can read and configure, never drain.
+    it("never grants the PERMISSION to sponsor, at any tenant role", () => {
+      // Asserted on permissions, not role names. An earlier version of this test checked that the
+      // role "sponsor" was not granted, which was true and meaningless: the "admin" role it DID
+      // grant contains `sponsor:create`, so the session could spend after all.
       for (const role of ["owner", "admin", "member"] as const) {
-        expect(rolesFor(role), `${role} must not be able to sponsor`).not.toContain("sponsor");
+        const granted = permissionsFor(rolesFor(role));
+        expect(granted.has("sponsor:create"), `${role} must not be able to spend from a browser`).toBe(false);
       }
     });
 
-    it("maps owner and admin to admin, and member to read-only", () => {
-      expect(rolesFor("owner")).toEqual(["admin"]);
-      expect(rolesFor("admin")).toEqual(["admin"]);
+    it("maps owner and admin to tenant_admin, and member to read-only", () => {
+      expect(rolesFor("owner")).toEqual(["tenant_admin"]);
+      expect(rolesFor("admin")).toEqual(["tenant_admin"]);
       expect(rolesFor("member")).toEqual(["viewer"]);
+    });
+
+    it("can still administer its own account", () => {
+      const granted = permissionsFor(rolesFor("owner"));
+      // Not being able to spend must not mean not being able to work: minting keys and editing
+      // policy is what a customer signs in to do.
+      for (const permission of ["key:write", "policy:write", "metrics:read"] as const) {
+        expect(granted.has(permission), `an owner needs ${permission}`).toBe(true);
+      }
+      // And never reads across tenants.
+      expect(granted.has("platform:read")).toBe(false);
     });
   });
 

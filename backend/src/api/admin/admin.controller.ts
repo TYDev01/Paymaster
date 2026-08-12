@@ -26,7 +26,7 @@ import {
   type UpsertPolicyRequest,
 } from "./admin.dto.js";
 import type {ActorContext, AdminService} from "./admin.service.js";
-import {forTenant} from "../../db/scope.js";
+import {forTenant, PLATFORM_SCOPE} from "../../db/scope.js";
 
 export const ADMIN_SERVICE = Symbol("ADMIN_SERVICE");
 
@@ -165,5 +165,17 @@ export class AdminController {
  * simply by naming it, which is the single most likely way a boundary like this gets broken.
  */
 function actorContext(principal: Principal, clientIp: string | undefined): ActorContext {
-  return {actor: principal.apiKeyId, clientIp, scope: forTenant(principal.tenantId)};
+  const own = forTenant(principal.tenantId);
+  return {
+    actor: principal.apiKeyId,
+    clientIp,
+    // Reads widen to every tenant only for a holder of `platform:read` — the operator console.
+    // A tenant-scoped session can never hold it, because a role cannot be granted by someone who
+    // does not have it (see AdminService.createKey).
+    scope: principal.permissions.has("platform:read") ? PLATFORM_SCOPE : own,
+    // Writes never widen. A platform operator editing a customer's policy from their own console
+    // is a much larger grant than seeing it, and support does not need it.
+    writeScope: own,
+    permissions: principal.permissions,
+  };
 }

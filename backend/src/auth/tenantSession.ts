@@ -136,15 +136,17 @@ export class TenantSessionService {
 /**
  * Tenant role → what the session may do.
  *
- * Note what is NOT granted: no human session ever gets `sponsor`. A dashboard login must not be
- * able to spend the tenant's balance — that is what an API key is for, held by their server. The
- * separation means a stolen dashboard session cannot drain a deposit, only read and configure.
+ * `tenant_admin` rather than `admin`, and the difference is the whole point: neither grants
+ * `sponsor:create`, so a browser session cannot spend the tenant's balance directly. It can still
+ * MINT a key that spends — that is the product, and the escalation rule permits exactly that one
+ * delegation — but the theft then has to write an audit entry naming a credential that can be
+ * revoked on its own, rather than quietly spending as the person whose tab was open.
  */
 export function rolesFor(role: TenantRole): readonly Role[] {
   switch (role) {
     case "owner":
     case "admin":
-      return ["admin"];
+      return ["tenant_admin"];
     case "member":
       return ["viewer"];
   }
