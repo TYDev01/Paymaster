@@ -1,0 +1,189 @@
+/*
+ * The same design tokens as the operator console — one product, one palette.
+ *
+ * The console's shadcn and tw-animate-css imports are dropped: this app builds its own controls on
+ * plain Tailwind, and carrying a component library it never renders would mean carrying its CSS
+ * into every page load for nothing.
+ */
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Oil dark / ash silver.
+ *
+ * A monitoring console is read for hours in a dim room, often beside a terminal, so the surface is
+ * near-black with a faint green cast (oil) and the ink is a desaturated silver (ash) rather than
+ * white — pure white on near-black vibrates and is tiring at this dwell time.
+ *
+ * The app is dark-only and deliberately so; the tokens live on :root rather than under .dark, so
+ * there is no unstyled flash and no half-supported light mode pretending to exist.
+ *
+ * Series colors are NOT invented here. They are the validated categorical steps for a dark surface,
+ * checked against THIS surface (#0d1010): lightness band, chroma floor, CVD separation, normal-
+ * vision floor and 3:1 contrast all pass. Do not hand-edit a --series-* value without re-running
+ * the validator — the slot ORDER is the colorblind-safety mechanism, not decoration.
+ * ---------------------------------------------------------------------------------------------- */
+:root {
+  color-scheme: dark;
+
+  /* Oil — surfaces, darkest to lightest. */
+  --oil-950: #070909;
+  --oil-900: #0b0e0e;
+  --oil-850: #0d1010;
+  --oil-800: #121615;
+  --oil-750: #171b1a;
+  --oil-700: #1d2221;
+
+  /* Ash — ink and lines. */
+  --ash-100: #e6eae8;
+  --ash-200: #c9cfcd;
+  --ash-300: #a7afac;
+  --ash-400: #848d8a;
+  --ash-500: #656e6b;
+  --ash-600: #4a5350;
+  --ash-700: #333b39;
+  --ash-800: #232a28;
+
+  --background: var(--oil-950);
+  --foreground: var(--ash-100);
+  --card: var(--oil-850);
+  --card-foreground: var(--ash-100);
+  --popover: var(--oil-800);
+  --popover-foreground: var(--ash-100);
+  --primary: var(--ash-200);
+  --primary-foreground: var(--oil-950);
+  --secondary: var(--oil-750);
+  --secondary-foreground: var(--ash-200);
+  --muted: var(--oil-800);
+  --muted-foreground: var(--ash-400);
+  --accent: var(--oil-750);
+  --accent-foreground: var(--ash-100);
+  --destructive: #d03b3b;
+  --border: var(--ash-800);
+  --input: var(--oil-750);
+  --ring: var(--ash-600);
+  --radius: 0.5rem;
+
+  --sidebar: var(--oil-900);
+  --sidebar-foreground: var(--ash-300);
+  --sidebar-primary: var(--ash-100);
+  --sidebar-primary-foreground: var(--oil-950);
+  --sidebar-accent: var(--oil-800);
+  --sidebar-accent-foreground: var(--ash-100);
+  --sidebar-border: var(--ash-800);
+  --sidebar-ring: var(--ash-600);
+
+  /* Status. Fixed roles, never reused as a series color, and never shown without an icon+label. */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+
+  /* Categorical series, in validated slot order. Never cycle past slot 8 — fold to "Other". */
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+
+  /* shadcn's chart slots, aliased to the same validated order so any shadcn chart inherits it. */
+  --chart-1: var(--series-1);
+  --chart-2: var(--series-2);
+  --chart-3: var(--series-3);
+  --chart-4: var(--series-4);
+  --chart-5: var(--series-5);
+
+  /* Chart furniture: recessive by design — the data is the only thing that should carry weight. */
+  --viz-surface: var(--oil-850);
+  --viz-grid: #1c2321;
+  --viz-axis: var(--ash-600);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    /* A faint vertical lift stops a full-bleed near-black page reading as a dead rectangle. */
+    background-image: radial-gradient(120rem 60rem at 50% -20%, #0d1211 0%, transparent 70%);
+  }
+  html {
+    @apply font-sans;
+  }
+  /* Tabular figures everywhere a number can change in place — otherwise digits jitter on refresh
+     and the eye reads movement that is not in the data. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+}
+
+@theme inline {
+  --color-oil-950: var(--oil-950);
+  --color-oil-900: var(--oil-900);
+  --color-oil-850: var(--oil-850);
+  --color-oil-800: var(--oil-800);
+  --color-oil-750: var(--oil-750);
+  --color-oil-700: var(--oil-700);
+  --color-ash-100: var(--ash-100);
+  --color-ash-200: var(--ash-200);
+  --color-ash-300: var(--ash-300);
+  --color-ash-400: var(--ash-400);
+  --color-ash-500: var(--ash-500);
+  --color-ash-600: var(--ash-600);
+  --color-ash-700: var(--ash-700);
+  --color-ash-800: var(--ash-800);
+  --color-good: var(--status-good);
+  --color-warning: var(--status-warning);
+  --color-serious: var(--status-serious);
+  --color-critical: var(--status-critical);
+}

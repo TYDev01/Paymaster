@@ -169,7 +169,7 @@ CHAINS='${CHAINS_JSON}'
 # SDK example (sdk/examples/sponsor-and-send.ts)
 API_KEY=${API_KEY}
 ACCOUNT_OWNER_KEY=${ACCOUNT_OWNER_KEY}
-PAYMASTER_URL=http://localhost:3000
+PAYMASTER_URL=http://localhost:3100
 BUNDLER_URL=http://localhost:3001
 EOF
 

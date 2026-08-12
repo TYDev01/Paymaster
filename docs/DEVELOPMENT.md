@@ -48,7 +48,8 @@ all consume. Or bring up the full stack with `docker compose up`, and add
 contracts/    VerifyingPaymaster, its tests, and the deploy script
 backend/      The sponsorship service (NestJS over Fastify, but see below)
 sdk/          Framework-agnostic TypeScript client
-frontend/     Operations console (Next.js). A standalone npm project, NOT a root workspace
+web/          Public site + customer dashboard (Next.js, :3000). Standalone npm project
+frontend/     Operator console (Next.js, :3003). A standalone npm project, NOT a root workspace
 deploy/       Deploy runners, Helm chart, monitoring config, load tests
 docs/         This documentation set
 ```
