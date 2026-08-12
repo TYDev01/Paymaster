@@ -19,6 +19,7 @@ import type {ApiKeyStore} from "../auth/apiKeyStore.js";
 import {InMemoryApiKeyStore} from "../auth/inMemoryApiKeyStore.js";
 import {JwtService} from "../auth/jwt.js";
 import {ChainRegistry} from "../chain/chainRegistry.js";
+import {TenantBalanceReader} from "../chain/tenantBalance.js";
 import {ChainRegistryTokenBalanceReader} from "../chain/tokenBalanceReader.js";
 import {CompositeAlerter, LoggingAlerter, type Alerter} from "../monitoring/alerting.js";
 import {WebhookAlerter} from "../monitoring/webhookAlerter.js";
@@ -76,6 +77,11 @@ export interface AppDependencies {
   /** True when quota counters are process-local, so quotas do not hold across replicas. */
   readonly quotasAreLocal: boolean;
   /**
+   * Reads on-chain tenant balances. Defaults to one built over `chains`; injectable so a test can
+   * drive the funding view and the pre-sign check without an RPC endpoint behind them.
+   */
+  readonly tenantBalances?: TenantBalanceReader | undefined;
+  /**
    * Long-running loops (funding monitor, spend reconciler) to run alongside the HTTP app. Empty in
    * tests, which build the graph directly and do not want timers; populated by `buildDependencies`.
    */
@@ -109,8 +115,13 @@ export class AppModule {
   static forRoot(deps: AppDependencies): DynamicModule {
     const metrics = deps.metrics;
 
+    // Built unconditionally: it is a cache over a read, so it costs nothing until a chain that
+    // actually runs a multi-tenant paymaster asks it something.
+    const tenantBalances = deps.tenantBalances ?? new TenantBalanceReader(deps.chains);
+
     const sponsorService = new SponsorService({
       chains: deps.chains,
+      tenantBalances,
       policies: deps.policies,
       // The metrics facade doubles as the policy observer, so denials and latency are captured here.
       policyEngine: new PolicyEngine(metrics === undefined ? {} : {observer: metrics}),
@@ -135,6 +146,8 @@ export class AppModule {
       sponsorships: deps.sponsorships,
       audit: deps.audit,
       broadcast: deps.policyBroadcast,
+      chains: deps.chains,
+      tenantBalances,
     });
 
     const providers: Provider[] = [

@@ -1,8 +1,11 @@
 import {randomUUID} from "node:crypto";
 
-import type {Address} from "viem";
+import type {Address, Hex} from "viem";
 
 import {generateApiKey} from "../../auth/apiKey.js";
+import type {ChainRegistry} from "../../chain/chainRegistry.js";
+import type {TenantBalanceReader} from "../../chain/tenantBalance.js";
+import {onChainTenantKey, type PaymasterKind} from "../../signature/paymasterLayout.js";
 import type {ApiKeyRecord, ApiKeyStore} from "../../auth/apiKeyStore.js";
 import {permissionsFor, type Permission, type Role} from "../../auth/permissions.js";
 import type {AuditLogRepository} from "../../db/auditLogRepository.js";
@@ -67,6 +70,30 @@ export interface AdminDeps {
    * reloading locally is the whole job.
    */
   readonly broadcast?: PolicyBroadcast | undefined;
+  /** Chains served, for the funding view. */
+  readonly chains?: ChainRegistry | undefined;
+  /** Reads on-chain tenant balances. Absent means the funding view reports balances as unknown. */
+  readonly tenantBalances?: TenantBalanceReader | undefined;
+}
+
+/**
+ * Everything a customer needs to put money on one chain, and what they have on it now.
+ *
+ * `tenantKey` is the argument to `depositFor` and is the reason this endpoint exists at all: it is
+ * `keccak256(tenantId)`, which a customer cannot derive from anything shown in the dashboard and
+ * cannot guess. Funding without it is impossible — a plain transfer to the paymaster credits no
+ * tenant and cannot be attributed to one afterwards.
+ */
+export interface TenantFunding {
+  readonly chainId: number;
+  readonly chainName: string;
+  readonly paymaster: Address;
+  readonly paymasterKind: PaymasterKind;
+  readonly tenantKey: Hex;
+  /** Wei. `null` when the balance could not be read, which is not the same as zero. */
+  readonly balanceWei: string | null;
+  readonly nativeCurrency: {readonly symbol: string; readonly decimals: number};
+  readonly explorerUrl: string;
 }
 
 export interface ActorContext {
@@ -280,6 +307,58 @@ export class AdminService {
       ...(query.sender === undefined ? {} : {sender: query.sender as Address}),
       ...(query.limit === undefined ? {} : {limit: query.limit}),
     });
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // funding
+  // ------------------------------------------------------------------------------------------
+
+  /**
+   * Where this tenant funds itself, per chain, and what it has.
+   *
+   * Scoped to the caller's own tenant even for a platform operator. `context.scope` widens READS
+   * across tenants elsewhere, but a funding key is an instruction to send money: showing an
+   * operator a customer's key in a view titled "fund your account" is how money ends up in the
+   * wrong balance. Support can read balances through the sponsorship and chain views instead.
+   *
+   * Chains running the single-tenant paymaster are omitted rather than shown with a zero balance.
+   * There is nothing to fund per tenant there — the deposit is the operator's — and a zero would
+   * read as "you are out of money" rather than "this does not apply to you".
+   */
+  async listFunding(context: ActorContext): Promise<readonly TenantFunding[]> {
+    const chains = this.deps.chains;
+    if (chains === undefined) return [];
+
+    const tenant = writingTenant(context.writeScope, "read funding");
+    const balances = this.deps.tenantBalances;
+    const funding: TenantFunding[] = [];
+
+    for (const chain of chains.adapters) {
+      if (chain.config.paymasterKind !== "tenant") continue;
+
+      // Read per chain rather than in one batch: one unreachable RPC must not blank the balances
+      // of every other chain, since the tenant key it would have hidden is the actionable part.
+      let balanceWei: string | null = null;
+      try {
+        const balance = await balances?.balanceOf(chain.config.chainId, tenant);
+        if (balance !== undefined) balanceWei = balance.toString();
+      } catch {
+        balanceWei = null;
+      }
+
+      funding.push({
+        chainId: chain.config.chainId,
+        chainName: chain.config.name,
+        paymaster: chain.config.paymaster,
+        paymasterKind: chain.config.paymasterKind,
+        tenantKey: onChainTenantKey(tenant),
+        balanceWei,
+        nativeCurrency: chain.config.nativeCurrency,
+        explorerUrl: chain.config.explorerUrl,
+      });
+    }
+
+    return funding;
   }
 
   async listAudit(query: {actor?: string; action?: string; since?: number; limit?: number}, context: ActorContext) {

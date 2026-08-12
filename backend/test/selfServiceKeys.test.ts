@@ -10,7 +10,10 @@ import {hashApiKey} from "../src/auth/apiKey.js";
 import type {IdentityProvider, IdentityResult} from "../src/auth/identity.js";
 import {JwtService} from "../src/auth/jwt.js";
 import {TenantSessionService} from "../src/auth/tenantSession.js";
+import {CANONICAL_ENTRYPOINT_V07} from "../src/chain/chainConfig.js";
 import {ChainRegistry} from "../src/chain/chainRegistry.js";
+import {TenantBalanceReader} from "../src/chain/tenantBalance.js";
+import {onChainTenantKey} from "../src/signature/paymasterLayout.js";
 import {migrate} from "../src/db/migrate.js";
 import {PostgresApiKeyStore} from "../src/db/postgresApiKeyStore.js";
 import {PostgresPolicyRepository} from "../src/db/postgresPolicyRepository.js";
@@ -72,8 +75,48 @@ describe("self-service key issuance", () => {
     );
     await policySource.reload();
 
+    // Two chains, so the funding view has something to include and something to leave out.
+    const chains = ChainRegistry.fromConfigs([
+      {
+        chainId: 8453,
+        name: "Base",
+        rpcUrls: ["https://base.example.com"],
+        entryPoint: CANONICAL_ENTRYPOINT_V07,
+        paymaster: "0x1111111111111111111111111111111111111111",
+        paymasterKind: "tenant",
+        explorerUrl: "https://basescan.org",
+        nativeCurrency: {symbol: "ETH", decimals: 18},
+        minDepositWei: 0n,
+        minStakeWei: 0n,
+        enabled: true,
+      },
+      {
+        chainId: 10,
+        name: "Optimism",
+        rpcUrls: ["https://optimism.example.com"],
+        entryPoint: CANONICAL_ENTRYPOINT_V07,
+        paymaster: "0x2222222222222222222222222222222222222222",
+        paymasterKind: "verifying",
+        explorerUrl: "https://optimistic.etherscan.io",
+        nativeCurrency: {symbol: "ETH", decimals: 18},
+        minDepositWei: 0n,
+        minStakeWei: 0n,
+        enabled: true,
+      },
+    ]);
+
+    // Stands in for the RPC. What is under test here is the scoping and shape of the view, not the
+    // call — `tenantDifferential.test.ts` asserts the read itself against real bytecode.
+    const balanceRegistry = {
+      get: () => ({
+        config: {chainId: 8453, paymasterKind: "tenant" as const},
+        getTenantBalance: async () => 4_200_000_000_000_000_000n,
+      }),
+    } as unknown as ChainRegistry;
+
     const deps: AppDependencies = {
-      chains: ChainRegistry.fromConfigs([]),
+      chains,
+      tenantBalances: new TenantBalanceReader(balanceRegistry, {ttlMs: 0}),
       policies: policySource,
       signer: new LocalSponsorshipSigner(SIGNER_KEY),
       apiKeys: new PostgresApiKeyStore(pg.pool),
@@ -318,6 +361,62 @@ describe("self-service key issuance", () => {
       // Seeing every customer is a support requirement; editing their account from the same
       // credential is not, so writes stay bound to the operator's own tenant.
       expect(rows[0]?.tenant_id).toBe("default");
+    });
+  });
+
+  describe("funding", () => {
+    it("tells a customer where to send money, and what they have", async () => {
+      await tenants.createWithOwner({id: tenantId("t_acme"), name: "Acme", subject: ALICE});
+      const token = await signIn(ALICE, "t_acme");
+
+      const response = await get("/admin/funding", token);
+      expect(response.statusCode, response.body).toBe(200);
+      const {funding} = JSON.parse(response.body) as {
+        funding: {chainId: number; tenantKey: string; balanceWei: string}[];
+      };
+
+      // Only the chain that HAS per-tenant balances. Listing the single-tenant chain with a zero
+      // would read as "you are out of money" rather than "this does not apply to you".
+      expect(funding.map((f) => f.chainId)).toEqual([8453]);
+      expect(funding[0]!.balanceWei).toBe("4200000000000000000");
+
+      // The whole reason this endpoint exists: `depositFor` takes this, and a customer cannot
+      // derive it from anything else the dashboard shows them.
+      expect(funding[0]!.tenantKey).toBe(onChainTenantKey(tenantId("t_acme")));
+    });
+
+    it("gives each tenant their own key, so one cannot fund into another's balance", async () => {
+      await tenants.createWithOwner({id: tenantId("t_acme"), name: "Acme", subject: ALICE});
+      await tenants.createWithOwner({id: tenantId("t_rival"), name: "Rival", subject: BOB});
+
+      const acme = JSON.parse((await get("/admin/funding", await signIn(ALICE, "t_acme"))).body) as {
+        funding: {tenantKey: string}[];
+      };
+      const rival = JSON.parse((await get("/admin/funding", await signIn(BOB, "t_rival"))).body) as {
+        funding: {tenantKey: string}[];
+      };
+
+      expect(acme.funding[0]!.tenantKey).not.toBe(rival.funding[0]!.tenantKey);
+    });
+
+    it("shows a platform operator their OWN funding key, not a customer's", async () => {
+      await tenants.createWithOwner({id: tenantId("t_acme"), name: "Acme", subject: ALICE});
+      const secret = `pm_test_${"q".repeat(44)}`;
+      await pg.pool.query(
+        `INSERT INTO api_keys (tenant_id, id, name, key_hash, display_prefix, roles)
+         VALUES ('default', 'platform-funding', 'operator', $1, 'pm_test_qqqq', ARRAY['platform'])`,
+        [hashApiKey(secret)],
+      );
+
+      const response = await get("/admin/funding", secret);
+      expect(response.statusCode, response.body).toBe(200);
+      const {funding} = JSON.parse(response.body) as {funding: {tenantKey: string}[]};
+
+      // `platform:read` widens reads across tenants everywhere else. Not here: a funding key is an
+      // instruction to send money, and showing an operator a customer's key under the heading
+      // "fund your account" is how money lands in the wrong balance.
+      expect(funding[0]!.tenantKey).toBe(onChainTenantKey(tenantId("default")));
+      expect(funding[0]!.tenantKey).not.toBe(onChainTenantKey(tenantId("t_acme")));
     });
   });
 });

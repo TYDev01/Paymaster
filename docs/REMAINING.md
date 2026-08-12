@@ -182,14 +182,21 @@ In dependency order — each item needs the ones above it.
    sponsorship there is signed with the CALLER'S tenant inside the digest, so the chain debits that
    customer's balance and no one else's.
 
-   What is left is everything around the balance rather than the balance itself:
-   - **funding a balance from the product.** `depositFor(bytes32)` is callable by anyone with a
-     wallet, but there is no UI for it and no way for a customer to discover their own tenant key.
-   - **refusing before signing.** The backend signs without checking the balance, so an empty tenant
-     is rejected on chain as an opaque `AA33`. Correct and safe — the money cannot move — but it
-     spends a bundler reputation hit on something we could have declined for free.
+   `GET /admin/funding` now returns, per multi-tenant chain, the paymaster address and the
+   `tenantKey` to pass to `depositFor` — which is `keccak256(tenantId)`, so a customer cannot
+   derive or guess it, and a plain transfer to the paymaster credits nobody. And an unfunded
+   request is refused with **402** before it is signed rather than reverting on chain as `AA33`.
+
+   Read the 402 for what it is: a fail-fast, NOT the spend guard. It reads the last mined balance,
+   so two requests that each fit but do not fit together both pass it; it fails OPEN when the RPC is
+   unreachable, because failing closed would turn an RPC blip into a sponsorship outage to protect
+   money the contract already protects. The contract's reservation is what actually holds the line.
+
+   What is left:
+   - **a funding UI.** The data is served; nothing renders it or connects a wallet to `depositFor`.
    - **`setController` is owner-only**, so self-service withdrawal needs an admin path.
    - **reconciling** the `sponsorships` table against on-chain balances.
+   - **subscriptions**: prepaid periods, a grace window, and suspension on lapse.
 
    The paragraph below is kept as written because it describes the shape the rest of this still has
    to grow. One line of it is now wrong and worth flagging rather than quietly editing: it concluded

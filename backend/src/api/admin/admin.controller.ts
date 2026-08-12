@@ -121,6 +121,24 @@ export class AdminController {
   }
 
   // ------------------------------------------------------------------------------------------
+  // funding
+  // ------------------------------------------------------------------------------------------
+
+  /**
+   * Where to send money, and what this tenant has.
+   *
+   * Gated on `key:read` rather than a new permission: it is account self-service, the same
+   * authority as seeing your own keys, and it reveals nothing about anyone else. A tenant key is
+   * derived from a tenant id, so it is not a secret — but it IS the only way to fund correctly,
+   * which is why it needs an endpoint at all.
+   */
+  @Get("funding")
+  @RequirePermissions("key:read")
+  async listFunding(@CurrentPrincipal() principal: Principal, @Ip() clientIp: string) {
+    return {funding: await this.service.listFunding(actorContext(principal, clientIp))};
+  }
+
+  // ------------------------------------------------------------------------------------------
   // reporting
   // ------------------------------------------------------------------------------------------
 
