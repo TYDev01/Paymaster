@@ -119,6 +119,7 @@ describe("maxCost <-> EntryPoint requiredPrefund", () => {
     const withNonce = {...baseOp(), nonce};
 
     const attestation = await engine.attest({
+      kind: "verifying",
       userOp: withNonce,
       chainId,
       paymaster,

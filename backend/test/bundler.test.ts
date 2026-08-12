@@ -153,6 +153,7 @@ describeBundler("paymaster <-> rundler (real bundler)", () => {
     };
 
     const attestation = await engine.attest({
+      kind: "verifying",
       userOp: base,
       chainId,
       paymaster: pm,

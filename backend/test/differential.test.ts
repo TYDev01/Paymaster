@@ -55,6 +55,7 @@ describe("signature engine <-> VerifyingPaymaster differential", () => {
       preVerificationGas: 100_000n,
       gasFees: toHex(packUint128Pair(1_000_000_000n, 20_000_000_000n), {size: 32}),
       paymasterAndData: encodePaymasterAndDataPrefix({
+        kind: "verifying",
         paymaster,
         paymasterVerificationGasLimit: PM_VERIFICATION_GAS,
         postOpGasLimit: POSTOP_GAS,
@@ -110,6 +111,7 @@ describe("signature engine <-> VerifyingPaymaster differential", () => {
 
     const expected = await onChainHash(op, validUntil, validAfter);
     const actual = sponsorshipDigest({
+      kind: "verifying",
       userOp: op,
       chainId: anvil.publicClient.chain!.id,
       paymaster,
@@ -140,6 +142,7 @@ describe("signature engine <-> VerifyingPaymaster differential", () => {
     for (const {name, op, validUntil, validAfter} of cases) {
       const expected = await onChainHash(op, validUntil, validAfter);
       const actual = sponsorshipDigest({
+        kind: "verifying",
         userOp: op,
         chainId: anvil.publicClient.chain!.id,
         paymaster,
@@ -153,6 +156,7 @@ describe("signature engine <-> VerifyingPaymaster differential", () => {
   it("digest is sensitive to every signed field", async () => {
     const validUntil = 1_800_000_000;
     const base = sponsorshipDigest({
+      kind: "verifying",
       userOp: baseOp(),
       chainId: anvil.publicClient.chain!.id,
       paymaster,
@@ -172,6 +176,7 @@ describe("signature engine <-> VerifyingPaymaster differential", () => {
         "paymasterGasLimits",
         baseOp({
           paymasterAndData: encodePaymasterAndDataPrefix({
+            kind: "verifying",
             paymaster,
             paymasterVerificationGasLimit: PM_VERIFICATION_GAS + 1n,
             postOpGasLimit: POSTOP_GAS,
@@ -184,6 +189,7 @@ describe("signature engine <-> VerifyingPaymaster differential", () => {
 
     for (const [field, op] of mutations) {
       const mutated = sponsorshipDigest({
+        kind: "verifying",
         userOp: op,
         chainId: anvil.publicClient.chain!.id,
         paymaster,
@@ -195,6 +201,7 @@ describe("signature engine <-> VerifyingPaymaster differential", () => {
 
     // The timestamps are signed too.
     const differentWindow = sponsorshipDigest({
+      kind: "verifying",
       userOp: baseOp(),
       chainId: anvil.publicClient.chain!.id,
       paymaster,
@@ -209,6 +216,7 @@ describe("signature engine <-> VerifyingPaymaster differential", () => {
     const validUntil = 1_800_000_000;
 
     const attestation = await engine.attest({
+      kind: "verifying",
       userOp: baseOp(),
       chainId: anvil.publicClient.chain!.id,
       paymaster,
@@ -226,7 +234,7 @@ describe("signature engine <-> VerifyingPaymaster differential", () => {
     const {recoverAddress} = await import("viem");
     const recovered = await recoverAddress({
       hash: digest,
-      signature: decodePaymasterAndData(attestation.paymasterAndData).signature,
+      signature: decodePaymasterAndData(attestation.paymasterAndData, "verifying").signature,
     });
 
     expect(recovered).toBe(signer.address);
@@ -247,6 +255,7 @@ describe("signature engine <-> VerifyingPaymaster differential", () => {
     const validAfter = 1_700_000_000;
 
     const attestation = await engine.attest({
+      kind: "verifying",
       userOp: baseOp(),
       chainId: anvil.publicClient.chain!.id,
       paymaster,

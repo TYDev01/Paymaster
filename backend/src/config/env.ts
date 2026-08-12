@@ -337,6 +337,9 @@ const chainJsonSchema = z.array(
     rpcUrls: z.array(z.string().url()).min(1),
     entryPoint: z.string(),
     paymaster: z.string(),
+    // Omitted means the single-tenant contract: every config written before multi-tenancy existed
+    // describes one, and defaulting the other way would break them at the first sponsorship.
+    paymasterKind: z.enum(["verifying", "tenant"]).default("verifying"),
     explorerUrl: z.string().url(),
     nativeCurrency: z.object({symbol: z.string().min(1), decimals: z.number().int()}),
     minDepositWei: z.union([z.string(), z.number()]).transform((v) => BigInt(v)),

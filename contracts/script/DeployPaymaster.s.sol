@@ -5,6 +5,32 @@ import {Script, console} from "forge-std/Script.sol";
 import {IEntryPoint} from "account-abstraction/interfaces/IEntryPoint.sol";
 
 import {VerifyingPaymaster} from "../src/VerifyingPaymaster.sol";
+import {TenantPaymaster} from "../src/TenantPaymaster.sol";
+
+/// @notice The surface this script needs, common to both paymasters.
+///
+/// @dev Declared here rather than extracted into a shared base contract. The two paymasters are
+///      deliberately independent — see the header of TenantPaymaster — and giving them a common
+///      ancestor purely so a deploy script could hold one variable would couple them on chain for
+///      an off-chain convenience. An interface costs nothing at runtime and expresses the same
+///      thing: these happen to share a management surface, not a lineage.
+interface IDeployedPaymaster {
+    function deposit() external payable;
+    function addStake(
+        uint32 unstakeDelaySec
+    ) external payable;
+    function getDeposit() external view returns (uint256);
+    function signerCount() external view returns (uint256);
+    function isSigner(
+        address signer
+    ) external view returns (bool);
+    function owner() external view returns (address);
+    function pendingOwner() external view returns (address);
+    function transferOwnership(
+        address newOwner
+    ) external;
+    function acceptOwnership() external;
+}
 
 /// @title DeployPaymaster
 /// @notice Deploys a VerifyingPaymaster, then funds and stakes it in one broadcast.
@@ -50,11 +76,21 @@ import {VerifyingPaymaster} from "../src/VerifyingPaymaster.sol";
 ///        DEPOSIT_WEI      (default 1 ether)
 ///        STAKE_WEI        (default 1 ether)
 ///        UNSTAKE_DELAY_SEC(default 86400)
+///        PAYMASTER_KIND   (default "verifying"; "tenant" for the multi-tenant contract)
 contract DeployPaymaster is Script {
     /// The canonical EntryPoint v0.7, deployed at this address on every supported chain.
     address internal constant CANONICAL_ENTRYPOINT_V07 = 0x0000000071727De22E5E9d8BAf0edAc6f37da032;
 
+    /// @dev Which contract to deploy. `Verifying` is first so the zero value is the single-tenant
+    ///      contract every existing deployment uses — a struct built without naming this field gets
+    ///      the behaviour it had before the field existed.
+    enum Kind {
+        Verifying,
+        Tenant
+    }
+
     struct Config {
+        Kind kind;
         address entryPoint;
         address owner;
         address signer;
@@ -63,7 +99,7 @@ contract DeployPaymaster is Script {
         uint32 unstakeDelaySec;
     }
 
-    function run() external returns (VerifyingPaymaster paymaster) {
+    function run() external returns (IDeployedPaymaster paymaster) {
         return deploy(configFromEnv());
     }
 
@@ -75,6 +111,7 @@ contract DeployPaymaster is Script {
     ///      backend separates parsing its environment from building anything out of it.
     function configFromEnv() public view returns (Config memory) {
         return Config({
+            kind: _kindFromEnv(),
             entryPoint: vm.envOr("ENTRYPOINT", CANONICAL_ENTRYPOINT_V07),
             owner: vm.envAddress("PAYMASTER_OWNER"),
             signer: vm.envAddress("PAYMASTER_SIGNER"),
@@ -84,9 +121,20 @@ contract DeployPaymaster is Script {
         });
     }
 
+    /// @dev An unrecognised value is rejected rather than defaulted. Silently deploying the
+    ///      single-tenant contract because someone wrote "multitenant" would hand every customer a
+    ///      shared deposit while the backend signed tenant-scoped attestations against it.
+    function _kindFromEnv() private view returns (Kind) {
+        string memory kind = vm.envOr("PAYMASTER_KIND", string("verifying"));
+        bytes32 hash = keccak256(bytes(kind));
+        if (hash == keccak256("verifying")) return Kind.Verifying;
+        if (hash == keccak256("tenant")) return Kind.Tenant;
+        revert(string.concat('PAYMASTER_KIND must be "verifying" or "tenant", got: ', kind));
+    }
+
     function deploy(
         Config memory config
-    ) public returns (VerifyingPaymaster paymaster) {
+    ) public returns (IDeployedPaymaster paymaster) {
         address entryPoint = config.entryPoint;
         address owner = config.owner;
         address signer = config.signer;
@@ -101,6 +149,7 @@ contract DeployPaymaster is Script {
         require(owner != address(0), "PAYMASTER_OWNER is required");
         require(signer != address(0), "PAYMASTER_SIGNER is required");
 
+        console.log("Kind:            ", config.kind == Kind.Verifying ? "verifying" : "tenant");
         console.log("EntryPoint:      ", entryPoint);
         console.log("Owner:           ", owner);
         console.log("Initial signer:  ", signer);
@@ -115,8 +164,11 @@ contract DeployPaymaster is Script {
         // it (see the ownership note above).
         (, address deployer,) = vm.readCallers();
 
-        paymaster = new VerifyingPaymaster(IEntryPoint(entryPoint), deployer, signer);
-        console.log("Paymaster deployed:", address(paymaster));
+        paymaster = config.kind == Kind.Verifying
+            ? IDeployedPaymaster(address(new VerifyingPaymaster(IEntryPoint(entryPoint), deployer, signer)))
+            : IDeployedPaymaster(address(new TenantPaymaster(IEntryPoint(entryPoint), deployer, signer)));
+        console.log(config.kind == Kind.Verifying ? "VerifyingPaymaster deployed:" : "TenantPaymaster deployed:");
+        console.log(" ", address(paymaster));
 
         if (depositWei > 0) {
             paymaster.deposit{value: depositWei}();

@@ -8,6 +8,7 @@ import {decodeCallTargets} from "../../policy/callData.js";
 import type {PolicyContext, PolicyDenial} from "../../policy/context.js";
 import type {PolicyEngine} from "../../policy/engine.js";
 import type {PolicySource} from "../../policy/policySource.js";
+import {onChainTenantKey} from "../../signature/paymasterLayout.js";
 import type {SignatureEngine} from "../../signature/signatureEngine.js";
 import {
   PAYMASTER_DATA_OFFSET,
@@ -167,7 +168,7 @@ export class SponsorService {
      */
     try {
       const validUntil = now + options.validitySeconds;
-      const attestation = await signatureEngine.attest({
+      const attestationRequest = {
         userOp,
         chainId: request.chainId,
         paymaster: chain.config.paymaster,
@@ -175,7 +176,17 @@ export class SponsorService {
         postOpGasLimit: options.postOpGasLimit,
         validUntil,
         validAfter: 0,
-      });
+      };
+      /**
+       * On a multi-tenant chain the tenant goes INSIDE the signature, so the caller's own tenant is
+       * what the chain will debit. It is taken from the authenticated caller and never from the
+       * request body — a tenant a caller could name is a tenant a caller could spend.
+       */
+      const attestation = await signatureEngine.attest(
+        chain.config.paymasterKind === "verifying"
+          ? {kind: "verifying", ...attestationRequest}
+          : {kind: "tenant", ...attestationRequest, tenant: onChainTenantKey(caller.tenantId)},
+      );
 
       /**
        * Recorded BEFORE the attestation is returned, and awaited.

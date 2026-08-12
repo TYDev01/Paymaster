@@ -118,6 +118,7 @@ describe("POST /paymaster/sponsor", () => {
       explorerUrl: "https://example.invalid",
       nativeCurrency: {symbol: "ETH", decimals: 18},
       minDepositWei: parseEther("1"),
+      paymasterKind: "verifying",
       minStakeWei: parseEther("1"),
       enabled: true,
     };

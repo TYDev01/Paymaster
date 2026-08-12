@@ -177,11 +177,22 @@ In dependency order — each item needs the ones above it.
    Platform reads and writes are also separated: `platform:read` widens READS to every tenant and
    never widens writes, which stay bound to the holder's own tenant. Seeing every customer is a
    support requirement; editing their account from the same credential is not.
-5. **A credit ledger.** ⚠️ The on-chain half is built (`TenantPaymaster`, see below); the backend
-   still signs against the old single-tenant contract, so nothing debits a tenant balance yet.
+5. **A credit ledger.** ⚠️ Mostly built. The contract holds the balances (`TenantPaymaster`, see
+   below) and the backend signs against it: set `paymasterKind: "tenant"` on a chain and every
+   sponsorship there is signed with the CALLER'S tenant inside the digest, so the chain debits that
+   customer's balance and no one else's.
 
-   The paragraph below is kept as written because it describes the shape the backend still has to
-   grow. One line of it is now wrong and worth flagging rather than quietly editing: it concluded
+   What is left is everything around the balance rather than the balance itself:
+   - **funding a balance from the product.** `depositFor(bytes32)` is callable by anyone with a
+     wallet, but there is no UI for it and no way for a customer to discover their own tenant key.
+   - **refusing before signing.** The backend signs without checking the balance, so an empty tenant
+     is rejected on chain as an opaque `AA33`. Correct and safe — the money cannot move — but it
+     spends a bundler reputation hit on something we could have declined for free.
+   - **`setController` is owner-only**, so self-service withdrawal needs an admin path.
+   - **reconciling** the `sponsorships` table against on-chain balances.
+
+   The paragraph below is kept as written because it describes the shape the rest of this still has
+   to grow. One line of it is now wrong and worth flagging rather than quietly editing: it concluded
    that per-tenant on-chain deposits were impractical and that the ledger had to be off chain. The
    stake analysis further down shows why that is only true of a CONTRACT per tenant — a balance per
    tenant inside one staked contract has the same isolation without the stake multiplier, and that

@@ -8,6 +8,7 @@ import {
   encodePaymasterAndDataPrefix,
   InvalidPaymasterDataError,
   SIGNATURE_OFFSET,
+  TENANT_SIGNATURE_OFFSET,
 } from "../src/signature/paymasterAndData.js";
 import {InvalidSponsorshipRequestError, SignatureEngine} from "../src/signature/signatureEngine.js";
 import {InvalidSigningKeyError, LocalSponsorshipSigner} from "../src/signature/signer.js";
@@ -16,6 +17,7 @@ const SIGNER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b
 const PAYMASTER = "0x1111111111111111111111111111111111111111" as Address;
 
 const FIELDS = {
+  kind: "verifying",
   paymaster: PAYMASTER,
   paymasterVerificationGasLimit: 300_000n,
   postOpGasLimit: 50_000n,
@@ -57,7 +59,7 @@ describe("paymasterAndData encoding", () => {
 
   it("round-trips through decode", () => {
     const signature = `0x${"11".repeat(65)}` as Hex;
-    const decoded = decodePaymasterAndData(encodePaymasterAndData(FIELDS, signature));
+    const decoded = decodePaymasterAndData(encodePaymasterAndData(FIELDS, signature), "verifying");
 
     expect(decoded.paymaster.toLowerCase()).toBe(PAYMASTER.toLowerCase());
     expect(decoded.paymasterVerificationGasLimit).toBe(FIELDS.paymasterVerificationGasLimit);
@@ -78,13 +80,68 @@ describe("paymasterAndData encoding", () => {
   });
 
   it("rejects a buffer too short to hold the fixed fields", () => {
-    expect(() => decodePaymasterAndData(`0x${"11".repeat(52)}`)).toThrow(InvalidPaymasterDataError);
+    expect(() => decodePaymasterAndData(`0x${"11".repeat(52)}`, "verifying")).toThrow(InvalidPaymasterDataError);
   });
 
   it("rejects a malformed paymaster address", () => {
     expect(() => encodePaymasterAndDataPrefix({...FIELDS, paymaster: "0xnope" as Address})).toThrow(
       InvalidPaymasterDataError,
     );
+  });
+});
+
+describe("paymasterAndData encoding for the multi-tenant contract", () => {
+  const TENANT = `0x${"ab".repeat(32)}` as Hex;
+  const TENANT_FIELDS = {...FIELDS, kind: "tenant", tenant: TENANT} as const;
+
+  it("encodes the signed prefix as 96 bytes: the 64 shared, plus the tenant", () => {
+    expect(size(encodePaymasterAndDataPrefix(TENANT_FIELDS))).toBe(TENANT_SIGNATURE_OFFSET);
+
+    // The first 64 bytes are byte-identical to the single-tenant layout, which is what lets one
+    // parser read the shared header of either.
+    const shared = encodePaymasterAndDataPrefix(FIELDS);
+    expect(encodePaymasterAndDataPrefix(TENANT_FIELDS).startsWith(shared)).toBe(true);
+  });
+
+  it("round-trips the tenant through decode", () => {
+    const signature = `0x${"11".repeat(65)}` as Hex;
+    const decoded = decodePaymasterAndData(encodePaymasterAndData(TENANT_FIELDS, signature), "tenant");
+
+    expect(decoded.kind).toBe("tenant");
+    expect(decoded.kind === "tenant" && decoded.tenant).toBe(TENANT);
+    expect(decoded.validUntil).toBe(TENANT_FIELDS.validUntil);
+    expect(decoded.signature).toBe(signature);
+  });
+
+  it("rejects a tenant that is not exactly 32 bytes", () => {
+    // A short tenant would left-shift the signature and silently corrupt the layout; a long one
+    // would push bytes of the tenant into the signature. Neither is recoverable on chain.
+    for (const bad of ["0x", `0x${"ab".repeat(31)}`, `0x${"ab".repeat(33)}`, "not-hex"] as Hex[]) {
+      expect(() => encodePaymasterAndDataPrefix({...TENANT_FIELDS, tenant: bad})).toThrow(InvalidPaymasterDataError);
+    }
+  });
+
+  it("rejects a buffer too short to hold a tenant", () => {
+    // 64 bytes is a COMPLETE single-tenant prefix and a truncated multi-tenant one. Decoding it as
+    // the latter would read a tenant from whatever followed in memory.
+    expect(() => decodePaymasterAndData(`0x${"11".repeat(64)}`, "tenant")).toThrow(InvalidPaymasterDataError);
+
+    // Under the single-tenant layout the same bytes are a complete prefix with no signature, which
+    // is what the contract's parser returns too. It decodes, and the empty signature is what the
+    // caller rejects it on.
+    expect(decodePaymasterAndData(`0x${"11".repeat(64)}`, "verifying").signature).toBe("0x");
+  });
+
+  it("decodes by the kind it is told, because the length cannot tell it apart", () => {
+    // The reason `decodePaymasterAndData` takes a kind instead of inferring one. These bytes are
+    // simultaneously a valid tenant attestation with a 64-byte signature and a valid verifying
+    // attestation with a 96-byte tail. An inferring decoder would pick one and be silently wrong
+    // about whose money is being spent for every caller using the other.
+    const ambiguous = encodePaymasterAndData(TENANT_FIELDS, `0x${"11".repeat(64)}`);
+    expect(size(ambiguous)).toBe(160);
+
+    expect(decodePaymasterAndData(ambiguous, "tenant").signature).toBe(`0x${"11".repeat(64)}`);
+    expect(size(decodePaymasterAndData(ambiguous, "verifying").signature)).toBe(96);
   });
 });
 
@@ -117,6 +174,7 @@ describe("SignatureEngine", () => {
   const engine = new SignatureEngine(new LocalSponsorshipSigner(SIGNER_KEY));
 
   const request = {
+    kind: "verifying",
     userOp: userOp(),
     chainId: 8453,
     paymaster: PAYMASTER,
@@ -128,7 +186,7 @@ describe("SignatureEngine", () => {
 
   it("produces paymasterAndData the contract's layout can parse", async () => {
     const attestation = await engine.attest(request);
-    const decoded = decodePaymasterAndData(attestation.paymasterAndData);
+    const decoded = decodePaymasterAndData(attestation.paymasterAndData, "verifying");
 
     expect(decoded.paymaster.toLowerCase()).toBe(PAYMASTER.toLowerCase());
     expect(decoded.validUntil).toBe(request.validUntil);
@@ -166,8 +224,8 @@ describe("SignatureEngine", () => {
     const a = await engine.attest(request);
     const b = await engine.attest({...request, paymaster: "0x2222222222222222222222222222222222222222"});
 
-    expect(decodePaymasterAndData(a.paymasterAndData).signature).not.toBe(
-      decodePaymasterAndData(b.paymasterAndData).signature,
+    expect(decodePaymasterAndData(a.paymasterAndData, "verifying").signature).not.toBe(
+      decodePaymasterAndData(b.paymasterAndData, "verifying").signature,
     );
   });
 

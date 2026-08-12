@@ -125,6 +125,13 @@ for i in $(seq 0 $((chain_count - 1))); do
 
   deposit="$(echo "${entry}" | jq -r '.depositWei // "1000000000000000000"')"
   stake="$(echo "${entry}" | jq -r '.stakeWei // "1000000000000000000"')"
+  # Which paymaster contract this chain runs. Defaults to the single-tenant one, so a chains file
+  # written before multi-tenancy existed keeps deploying exactly what it did before.
+  kind="$(echo "${entry}" | jq -r '.paymasterKind // "verifying"')"
+  case "${kind}" in
+    verifying|tenant) ;;
+    *) fail "${name}: paymasterKind must be \"verifying\" or \"tenant\", got \"${kind}\"" ;;
+  esac
   required="$(python3 -c "print(int('${deposit}') + int('${stake}'))")"
 
   if [ "${DRY_RUN}" -eq 0 ] && [ "${LEDGER:-0}" != "1" ] && [ -n "${DEPLOYER_KEY:-}" ]; then
@@ -188,6 +195,7 @@ for i in $(seq 0 $((chain_count - 1))); do
     ENTRYPOINT="${CANONICAL_ENTRYPOINT}" \
     PAYMASTER_OWNER="${PAYMASTER_OWNER}" \
     PAYMASTER_SIGNER="${PAYMASTER_SIGNER}" \
+    PAYMASTER_KIND="$(echo "${entry}" | jq -r '.paymasterKind // "verifying"')" \
     DEPOSIT_WEI="$(echo "${entry}" | jq -r '.depositWei // "1000000000000000000"')" \
     STAKE_WEI="$(echo "${entry}" | jq -r '.stakeWei // "1000000000000000000"')" \
     UNSTAKE_DELAY_SEC="$(echo "${entry}" | jq -r '.unstakeDelaySec // 86400')" \
@@ -204,9 +212,16 @@ for i in $(seq 0 $((chain_count - 1))); do
   # writes it after the transaction is mined, so reading it here cannot report a contract that was
   # never actually created.
   broadcast="${ROOT}/contracts/broadcast/DeployPaymaster.s.sol/${chain_id}/run-latest.json"
+  kind="$(echo "${entry}" | jq -r '.paymasterKind // "verifying"')"
+  # Matched on the contract the chain asked for. Hardcoding VerifyingPaymaster here would report a
+  # perfectly good multi-tenant deploy as a failure, after the money had already been staked.
+  case "${kind}" in
+    tenant) contract_name="TenantPaymaster" ;;
+    *) contract_name="VerifyingPaymaster" ;;
+  esac
   paymaster=""
-  [ -f "${broadcast}" ] && paymaster="$(jq -r \
-    '[.transactions[] | select(.transactionType == "CREATE" and (.contractName == "VerifyingPaymaster")) | .contractAddress] | last // empty' \
+  [ -f "${broadcast}" ] && paymaster="$(jq -r --arg contract "${contract_name}" \
+    '[.transactions[] | select(.transactionType == "CREATE" and (.contractName == $contract)) | .contractAddress] | last // empty' \
     "${broadcast}")"
 
   if [ "${deploy_status}" -ne 0 ] || [ -z "${paymaster}" ]; then
@@ -227,15 +242,17 @@ for i in $(seq 0 $((chain_count - 1))); do
      --arg entryPoint "${CANONICAL_ENTRYPOINT}" \
      --arg owner "${PAYMASTER_OWNER}" \
      --arg signer "${PAYMASTER_SIGNER}" \
+     --arg kind "${kind}" \
      --argjson block "${block}" \
      --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
      '.deployments = ((.deployments | map(select(.chainId != $id))) + [{
-        chainId: $id, name: $name, paymaster: $paymaster, entryPoint: $entryPoint,
-        owner: $owner, signer: $signer, deployedAtBlock: $block, deployedAt: $at
+        chainId: $id, name: $name, paymaster: $paymaster, paymasterKind: $kind,
+        entryPoint: $entryPoint, owner: $owner, signer: $signer,
+        deployedAtBlock: $block, deployedAt: $at
       }] | sort_by(.chainId))' "${DEPLOYMENTS_FILE}" > "${tmp}"
   mv "${tmp}" "${DEPLOYMENTS_FILE}"
 
-  log "${name}: deployed at ${paymaster} (block ${block})"
+  log "${name}: ${contract_name} deployed at ${paymaster} (block ${block})"
   deployed_ok+=("${chain_id}")
 done
 
@@ -262,6 +279,7 @@ chains_json="$(jq -c --slurpfile chains "${CHAINS_FILE}" '
         rpcUrls: ["${" + ($c.rpcUrlEnv // "RPC_URL") + "}"],
         entryPoint: $d.entryPoint,
         paymaster: $d.paymaster,
+        paymasterKind: ($d.paymasterKind // "verifying"),
         explorerUrl: $c.explorerUrl,
         nativeCurrency: $c.nativeCurrency,
         minDepositWei: ($c.minDepositWei // "0"),
