@@ -4,12 +4,12 @@ import type {Address} from "viem";
 
 import {generateApiKey} from "../../auth/apiKey.js";
 import type {ApiKeyRecord, ApiKeyStore} from "../../auth/apiKeyStore.js";
-import type {Role} from "../../auth/permissions.js";
+import {permissionsFor, type Permission, type Role} from "../../auth/permissions.js";
 import type {AuditLogRepository} from "../../db/auditLogRepository.js";
 import type {PolicyDefinition, PostgresPolicyRepository, StoredPolicy} from "../../db/postgresPolicyRepository.js";
 import type {SponsorshipRepository, StoredSponsorship} from "../../db/sponsorshipRepository.js";
 import type {PolicyBroadcast} from "../../policy/policyBroadcast.js";
-import {writingTenant, type Scope} from "../../db/scope.js";
+import {writingTenant, type Scope, type TenantScope} from "../../db/scope.js";
 import type {PolicySource} from "../../policy/policySource.js";
 import type {ApiKeyView, CreateKeyRequest, CreatedApiKeyView, UpsertPolicyRequest} from "./admin.dto.js";
 
@@ -19,6 +19,35 @@ export class AdminUnavailableError extends Error {
     this.name = "AdminUnavailableError";
   }
 }
+
+/**
+ * Raised when a caller tries to grant a role it does not itself hold.
+ *
+ * The rule this enforces — you cannot give away what you do not have — is what keeps `platform`
+ * unreachable from a tenant. Without it, any tenant admin could mint a key with `platform:read` and
+ * read every other customer's configuration; the boundary built in the schema would be walked
+ * around by the very API that is supposed to respect it.
+ */
+export class RoleEscalationError extends Error {
+  constructor(roles: readonly string[]) {
+    super(`cannot grant role(s) you do not hold: ${roles.join(", ")}`);
+    this.name = "RoleEscalationError";
+  }
+}
+
+/**
+ * Permissions that may be GRANTED without being held.
+ *
+ * Exactly one, and the narrowness is deliberate. `sponsor:create` is a delegated capability for a
+ * machine credential rather than administrative authority: issuing a key that can spend is the
+ * entire product, and a dashboard session deliberately cannot spend itself (see `rolesFor`). Without
+ * this exception the two rules would contradict each other and a customer could not mint the key
+ * they signed up for.
+ *
+ * Nothing else belongs here. Every other permission is authority over the account, and authority
+ * must not be creatable out of nothing.
+ */
+const DELEGATABLE: ReadonlySet<Permission> = new Set(["sponsor:create"]);
 
 export class PolicyInUseError extends Error {
   constructor(id: string) {
@@ -44,13 +73,28 @@ export interface ActorContext {
   readonly actor: string;
   readonly clientIp: string | undefined;
   /**
-   * The tenant this request acts within, taken from the authenticated principal.
+   * What this request may READ.
    *
-   * Part of the actor's identity rather than a separate argument, so it travels with every
-   * administrative call by construction: a new endpoint cannot read or write across tenants without
-   * inventing a scope from somewhere, and there is nowhere to invent one from.
+   * Normally the actor's own tenant. Platform scope for an operator holding `platform:read`, which
+   * is how the operator console sees across customers — that permission is not grantable through
+   * the API, so a tenant admin cannot obtain it.
    */
   readonly scope: Scope;
+  /**
+   * What this request may WRITE — always exactly one tenant, never platform.
+   *
+   * Reads and writes are separated because widening them together would be a much larger grant than
+   * the operator needs: seeing every customer's configuration is a support requirement, editing it
+   * from the same credential is not. A platform operator's writes land in their OWN tenant, and
+   * changing a customer's policy stays something that has to go through that customer's account.
+   */
+  readonly writeScope: TenantScope;
+  /**
+   * What the ACTOR may do, carried so a grant can be checked against it.
+   *
+   * A key may only ever be minted with permissions its creator already holds.
+   */
+  readonly permissions: ReadonlySet<Permission>;
 }
 
 /**
@@ -93,7 +137,7 @@ export class AdminService {
     };
 
     // Throws InvalidRuleConfigError before writing anything if a rule cannot be built.
-    await this.#policies().upsert(context.scope, definition);
+    await this.#policies().upsert(context.writeScope, definition);
     await this.#reloadEverywhere();
 
     await this.#audit(context, "policy.upsert", `policy:${request.id}`, {
@@ -102,13 +146,13 @@ export class AdminService {
       ruleTypes: request.rules.map((r) => r.ruleType),
     });
 
-    return this.#policies().get(context.scope, request.id);
+    return this.#policies().get(context.writeScope, request.id);
   }
 
   async deletePolicy(id: string, context: ActorContext): Promise<boolean> {
     let deleted: boolean;
     try {
-      deleted = await this.#policies().delete(context.scope, id);
+      deleted = await this.#policies().delete(context.writeScope, id);
     } catch (error) {
       // The FK from api_keys.policy_id is ON DELETE RESTRICT: a policy still pinned by a key must
       // not vanish, because those keys would fall back to naming any policy they like.
@@ -160,6 +204,14 @@ export class AdminService {
    * secret. AuditLogRepository would redact it anyway; not passing it is the belt to that braces.
    */
   async createKey(request: CreateKeyRequest, context: ActorContext): Promise<CreatedApiKeyView> {
+    // Checked against the PERMISSIONS the requested roles would grant, not against the role names.
+    // Comparing names would let a role that gains a permission later become an escalation without
+    // anything here changing — the question is what the new key could DO, not what it is called.
+    const granted = permissionsFor(request.roles as readonly Role[]);
+    const held = context.permissions;
+    const escalations = [...granted].filter((permission) => !held.has(permission) && !DELEGATABLE.has(permission));
+    if (escalations.length > 0) throw new RoleEscalationError(escalations);
+
     const generated = generateApiKey(request.environment);
     const record: Omit<ApiKeyRecord, "tenantId"> = {
       id: randomUUID(),
@@ -174,7 +226,7 @@ export class AdminService {
       lastUsedAt: undefined,
     };
 
-    await this.deps.apiKeys.create(context.scope, record);
+    await this.deps.apiKeys.create(context.writeScope, record);
     await this.#audit(context, "key.create", `api_key:${record.id}`, {
       name: record.name,
       roles: record.roles,
@@ -185,14 +237,14 @@ export class AdminService {
     // The record handed to the store omitted the tenant (the scope supplies it); the view puts it
     // back so the response says which account the key was minted in.
     return {
-      ...toView({...record, tenantId: writingTenant(context.scope, "create an api key")}),
+      ...toView({...record, tenantId: writingTenant(context.writeScope, "create an api key")}),
       secret: generated.secret,
     };
   }
 
   /** td.md's "Rotate keys": revocation is a flag, so history survives. */
   async revokeKey(id: string, context: ActorContext): Promise<boolean> {
-    const revoked = await this.deps.apiKeys.revoke(context.scope, id, Math.floor(Date.now() / 1000));
+    const revoked = await this.deps.apiKeys.revoke(context.writeScope, id, Math.floor(Date.now() / 1000));
     if (revoked) {
       await this.#audit(context, "key.revoke", `api_key:${id}`, {});
     }
@@ -252,7 +304,8 @@ export class AdminService {
     // Without a database there is no audit log — and no policy repository either, so every
     // mutating path has already thrown AdminUnavailableError before reaching here.
     await this.deps.audit?.record({
-      ...(context.scope.kind === "tenant" ? {tenantId: context.scope.tenantId} : {}),
+      // Audit entries belong to the tenant the action was performed IN.
+      tenantId: context.writeScope.tenantId,
       actor: context.actor,
       action,
       subject,
