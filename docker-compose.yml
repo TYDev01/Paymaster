@@ -130,6 +130,12 @@ services:
       PORT: "3000"
       DATABASE_URL: postgresql://paymaster:${POSTGRES_PASSWORD:-devpassword}@postgres:5432/paymaster
       REDIS_URL: redis://redis:6379
+      # Customer dashboard sign-in. All optional: unset, /auth/* answers 503 IDENTITY_DISABLED and
+      # the rest of the paymaster is unaffected — a deployment that only sponsors its own dApp
+      # never needs any of this. ./start.sh fills them in for the devnet.
+      PRIVY_APP_ID: "${PRIVY_APP_ID:-}"
+      ADMIN_JWT_SECRET: "${ADMIN_JWT_SECRET:-}"
+      TENANT_SELF_SIGNUP: "${TENANT_SELF_SIGNUP:-false}"
       # No defaults for either: the service must refuse to start rather than invent a signing key
       # or run unauthenticated. Generate with `npm run key:generate` in backend/.
       SPONSORSHIP_SIGNER_KEY: "${SPONSORSHIP_SIGNER_KEY:?set SPONSORSHIP_SIGNER_KEY in .env}"

@@ -46,8 +46,7 @@ export function dashboardConfig(): DashboardConfig {
 }
 
 export type ApiResult<T> =
-  | {readonly ok: true; readonly data: T}
-  | {readonly ok: false; readonly error: string; readonly status: number};
+  {readonly ok: true; readonly data: T} | {readonly ok: false; readonly error: string; readonly status: number};
 
 /**
  * Calls the paymaster backend.
@@ -81,7 +80,11 @@ export async function api<T>(
     const body: unknown = text === "" ? {} : safeParse(text);
 
     if (!response.ok) {
-      return {ok: false, error: messageOf(body) ?? `the paymaster API responded ${response.status}`, status: response.status};
+      return {
+        ok: false,
+        error: messageOf(body) ?? `the paymaster API responded ${response.status}`,
+        status: response.status,
+      };
     }
     return {ok: true, data: body as T};
   } catch (error) {
@@ -118,7 +121,19 @@ function safeParse(text: string): unknown {
   try {
     return JSON.parse(text);
   } catch {
-    return {message: text};
+    // Not JSON. An HTML document here almost always means `PAYMASTER_API_URL` points at something
+    // that is not the paymaster API — most often at THIS app, whose own 404 page is then what comes
+    // back. Surfacing the markup buries that in four kilobytes of script tags; naming it does not.
+    if (/^\s*<(!doctype|html)/i.test(text)) {
+      return {
+        message:
+          "the paymaster API returned an HTML page instead of JSON. Check PAYMASTER_API_URL — it " +
+          "should address the backend (http://127.0.0.1:3100 by default), not this app.",
+      };
+    }
+    // Bounded. A non-JSON body is diagnostic, not a message to a customer, and an unbounded one
+    // ends up rendered in a banner.
+    return {message: text.slice(0, 300)};
   }
 }
 

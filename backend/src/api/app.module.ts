@@ -534,13 +534,17 @@ async function ensureBootstrapPolicy(repository: PostgresPolicyRepository, env: 
  *     restarted. Rotating means setting a new BOOTSTRAP_API_KEY, which lands as a new row and
  *     leaves the revoked one auditable.
  */
-async function ensureBootstrapKey(pool: DatabasePool, secret: string): Promise<void> {
+export async function ensureBootstrapKey(pool: DatabasePool, secret: string): Promise<void> {
   const hash = hashApiKey(secret);
   await pool.query(
-    `INSERT INTO api_keys (id, name, key_hash, display_prefix, roles, enabled)
-     VALUES ($1, $2, $3, $4, ARRAY['admin'], true)
+    // `tenant_id` is NOT NULL as of migration 0004, and omitting it here meant every deployment
+    // WITH a database refused to boot — the in-memory path below had been updated to carry the
+    // default tenant and this one had not. Exported so a test can hold that line; nothing else
+    // exercised this function, which is why a total boot failure shipped unnoticed.
+    `INSERT INTO api_keys (tenant_id, id, name, key_hash, display_prefix, roles, enabled)
+     VALUES ($1, $2, $3, $4, $5, ARRAY['admin'], true)
      ON CONFLICT (key_hash) DO NOTHING`,
-    [`bootstrap-${hash.slice(0, 12)}`, "bootstrap admin key", hash, secret.slice(0, 16)],
+    [DEFAULT_TENANT_ID, `bootstrap-${hash.slice(0, 12)}`, "bootstrap admin key", hash, secret.slice(0, 16)],
   );
 }
 
