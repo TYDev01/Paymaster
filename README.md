@@ -69,6 +69,29 @@ signed-in customer and never has that credential in its process at all.
 
 ## Quickstart (local)
 
+```bash
+./start.sh
+```
+
+That is the whole thing: it checks the toolchain, installs what is missing, brings up the chain,
+deploys the contracts onto it, writes the backend's `.env`, starts the stack, and starts both web
+apps. It is idempotent — a second run redeploys nothing that is still on chain — and it leaves any
+port it finds already served alone rather than fighting whoever owns it.
+
+```bash
+./start.sh status        # what is up, and where
+./start.sh stop          # stop everything it started (data volumes are kept)
+./start.sh --fresh       # wipe the devnet chain and redeploy
+./start.sh --monitoring  # add Prometheus, Grafana and the OTel collector
+./start.sh --no-ui       # backend stack only
+```
+
+Postgres and Redis are remapped automatically if their host ports are taken, because nothing in the
+stack reaches them that way — the backend uses the compose network. A conflict on anvil's 8545 or
+the bundler's 3001 is reported instead: those ARE addressed by name from the host.
+
+### Doing it by hand
+
 Requires Foundry, Node ≥ 22, PostgreSQL 16, Redis, and the rundler binary.
 
 ```bash

@@ -73,3 +73,6 @@ Thumbs.db
 frontend/.next/
 frontend/.shots/
 frontend/next-env.d.ts
+
+# Runtime state from ./start.sh: pidfiles and logs.
+.run/
