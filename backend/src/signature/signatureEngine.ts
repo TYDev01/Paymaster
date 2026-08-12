@@ -1,11 +1,11 @@
 import type {Address, Hex} from "viem";
 
 import {UINT48_MAX, type PackedUserOperation} from "../domain/userOperation.js";
-import {encodePaymasterAndData, encodePaymasterAndDataPrefix} from "./paymasterAndData.js";
+import {encodePaymasterAndData, encodePaymasterAndDataPrefix, type PaymasterAndDataFields} from "./paymasterAndData.js";
 import {sponsorshipDigest} from "./typedData.js";
 import type {SponsorshipSigner} from "./signer.js";
 
-export interface SponsorshipRequest {
+interface CommonSponsorshipRequest {
   /** The operation to sponsor. Its `paymasterAndData` is ignored and rebuilt from these fields. */
   readonly userOp: PackedUserOperation;
   readonly chainId: number;
@@ -17,6 +17,16 @@ export interface SponsorshipRequest {
   /** Unix seconds before which the attestation is not yet valid. 0 means immediately. */
   readonly validAfter: number;
 }
+
+/**
+ * Discriminated on the paymaster kind, so a multi-tenant chain cannot be served an attestation with
+ * no tenant in it. That case is worth a type error rather than a runtime check: the resulting bytes
+ * would be a valid single-tenant attestation, correctly signed, that the multi-tenant contract
+ * either rejects opaquely or — if the layouts ever lined up — charges the wrong balance for.
+ */
+export type SponsorshipRequest =
+  | (CommonSponsorshipRequest & {readonly kind: "verifying"})
+  | (CommonSponsorshipRequest & {readonly kind: "tenant"; readonly tenant: Hex});
 
 export interface SponsorshipAttestation {
   readonly paymasterAndData: Hex;
@@ -46,13 +56,17 @@ export class SignatureEngine {
   async attest(request: SponsorshipRequest): Promise<SponsorshipAttestation> {
     this.#assertValidWindow(request);
 
-    const fields = {
+    const common = {
       paymaster: request.paymaster,
       paymasterVerificationGasLimit: request.paymasterVerificationGasLimit,
       postOpGasLimit: request.postOpGasLimit,
       validUntil: request.validUntil,
       validAfter: request.validAfter,
     };
+    const fields: PaymasterAndDataFields =
+      request.kind === "verifying"
+        ? {kind: "verifying", ...common}
+        : {kind: "tenant", ...common, tenant: request.tenant};
 
     // Rebuild paymasterAndData from our own fields and compute the digest over THAT, never over
     // whatever the caller supplied. The digest must describe the bytes that go on-chain.
@@ -61,13 +75,18 @@ export class SignatureEngine {
       paymasterAndData: encodePaymasterAndDataPrefix(fields),
     };
 
-    const digest = sponsorshipDigest({
+    const digestParams = {
       userOp,
       chainId: request.chainId,
       paymaster: request.paymaster,
       validUntil: request.validUntil,
       validAfter: request.validAfter,
-    });
+    };
+    const digest = sponsorshipDigest(
+      request.kind === "verifying"
+        ? {kind: "verifying", ...digestParams}
+        : {kind: "tenant", ...digestParams, tenant: request.tenant},
+    );
 
     const signature = await this.signer.signDigest(digest);
 

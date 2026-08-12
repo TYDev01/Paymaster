@@ -102,6 +102,7 @@ describe("paymasterAndData codec", () => {
     const random = prng(0x5eed);
     for (let i = 0; i < RUNS; i++) {
       const fields: PaymasterAndDataFields = {
+        kind: "verifying",
         paymaster: randomHex(random, 20) as Address,
         paymasterVerificationGasLimit: randomBigint(random, UINT128_MAX),
         postOpGasLimit: randomBigint(random, UINT128_MAX),
@@ -110,7 +111,7 @@ describe("paymasterAndData codec", () => {
       };
       const signature = randomHex(random, 65);
 
-      const decoded = decodePaymasterAndData(encodePaymasterAndData(fields, signature));
+      const decoded = decodePaymasterAndData(encodePaymasterAndData(fields, signature), "verifying");
 
       const describeCase = JSON.stringify(fields, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
       expect(decoded.paymaster.toLowerCase(), describeCase).toBe(fields.paymaster.toLowerCase());
@@ -126,6 +127,7 @@ describe("paymasterAndData codec", () => {
     const random = prng(0x7a17);
     const encoded = encodePaymasterAndData(
       {
+        kind: "verifying",
         paymaster: randomHex(random, 20) as Address,
         paymasterVerificationGasLimit: 300_000n,
         postOpGasLimit: 50_000n,
@@ -139,7 +141,7 @@ describe("paymasterAndData codec", () => {
     // and returns zeros would turn a malformed input into a valid-looking sponsorship window.
     for (let bytes = 0; bytes < 64; bytes++) {
       const truncated = encoded.slice(0, 2 + bytes * 2) as Hex;
-      expect(() => decodePaymasterAndData(truncated), `accepted a ${bytes}-byte prefix`).toThrow();
+      expect(() => decodePaymasterAndData(truncated, "verifying"), `accepted a ${bytes}-byte prefix`).toThrow();
     }
   });
 });

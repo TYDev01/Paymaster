@@ -32,10 +32,22 @@ export {
   PAYMASTER_POSTOP_GAS_OFFSET,
   PAYMASTER_VALIDATION_GAS_OFFSET,
   SIGNATURE_OFFSET,
+  TENANT_OFFSET,
+  TENANT_SIGNATURE_OFFSET,
   VALID_AFTER_OFFSET,
   VALID_UNTIL_OFFSET,
+  type DecodedPaymasterAndData,
   type PaymasterAndDataFields,
 } from "./signature/paymasterAndData.js";
+
+export {
+  layoutFor,
+  onChainTenantKey,
+  TENANT_LAYOUT,
+  VERIFYING_LAYOUT,
+  type PaymasterKind,
+  type PaymasterLayout,
+} from "./signature/paymasterLayout.js";
 
 export {
   paymasterGasLimitsFrom,
@@ -44,6 +56,7 @@ export {
   SPONSORSHIP_DOMAIN_NAME,
   SPONSORSHIP_DOMAIN_VERSION,
   SPONSORSHIP_TYPES,
+  TENANT_SPONSORSHIP_TYPES,
   type SponsorshipDigestParams,
 } from "./signature/typedData.js";
 

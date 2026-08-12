@@ -175,6 +175,7 @@ describe.skipIf(!FORK_ENABLED)("forked mainnet", () => {
       explorerUrl: "https://etherscan.io",
       nativeCurrency: {symbol: "ETH", decimals: 18},
       minDepositWei: parseEther("1"),
+      paymasterKind: "verifying",
       minStakeWei: parseEther("1"),
       enabled: true,
     };
@@ -209,6 +210,7 @@ describe.skipIf(!FORK_ENABLED)("forked mainnet", () => {
     expect(maxCost, "worst-case cost must be positive at a real base fee").toBeGreaterThan(0n);
 
     const attestation = await new SignatureEngine(new LocalSponsorshipSigner(signerKey)).attest({
+      kind: "verifying",
       userOp,
       chainId,
       paymaster,

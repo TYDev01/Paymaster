@@ -1,5 +1,7 @@
 import {getAddress, isAddress, type Address} from "viem";
 
+import type {PaymasterKind} from "../signature/paymasterLayout.js";
+
 /**
  * Everything needed to serve a chain. td.md requires that adding a chain be configuration only —
  * no code changes — so this is the complete set of per-chain knowledge in the system. Anything a
@@ -15,6 +17,15 @@ export interface ChainConfig {
   readonly rpcUrls: readonly string[];
   readonly entryPoint: Address;
   readonly paymaster: Address;
+  /**
+   * Which paymaster contract is deployed at `paymaster`. Signatures for the two are not
+   * interchangeable — different EIP-712 domain, different struct, different byte layout — so
+   * getting this wrong means every sponsorship on the chain fails to validate.
+   *
+   * Defaults to `verifying` where a config omits it, which is what every deployment predating
+   * multi-tenancy has.
+   */
+  readonly paymasterKind: PaymasterKind;
   readonly explorerUrl: string;
   readonly nativeCurrency: NativeCurrency;
 

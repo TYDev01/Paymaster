@@ -5,7 +5,8 @@ import {Test} from "forge-std/Test.sol";
 import {EntryPoint} from "account-abstraction/core/EntryPoint.sol";
 import {IStakeManager} from "account-abstraction/interfaces/IStakeManager.sol";
 
-import {DeployPaymaster} from "../script/DeployPaymaster.s.sol";
+import {DeployPaymaster, IDeployedPaymaster} from "../script/DeployPaymaster.s.sol";
+import {TenantPaymaster} from "../src/TenantPaymaster.sol";
 import {VerifyingPaymaster} from "../src/VerifyingPaymaster.sol";
 
 /// @notice Tests the DEPLOY SCRIPT, not the paymaster.
@@ -44,6 +45,7 @@ contract DeployPaymasterTest is Test {
 
     function config() internal view returns (DeployPaymaster.Config memory) {
         return DeployPaymaster.Config({
+            kind: DeployPaymaster.Kind.Verifying,
             entryPoint: address(entryPoint),
             owner: multisigOwner,
             signer: sponsorSigner,
@@ -56,7 +58,7 @@ contract DeployPaymasterTest is Test {
     /// The production shape: the intended owner is a multisig that is not the deployer. This is the
     /// case that used to revert.
     function test_deploysFundsAndStakesWhenOwnerIsNotTheDeployer() public {
-        VerifyingPaymaster paymaster = script.deploy(config());
+        IDeployedPaymaster paymaster = script.deploy(config());
 
         assertEq(paymaster.getDeposit(), DEPOSIT_WEI, "deposit not registered");
 
@@ -69,7 +71,7 @@ contract DeployPaymasterTest is Test {
     /// The handover is offered, not completed: `Ownable2Step` means a mistyped owner leaves control
     /// with the deployer rather than burning the contract.
     function test_offersOwnershipToTheIntendedOwnerWithoutCompletingIt() public {
-        VerifyingPaymaster paymaster = script.deploy(config());
+        IDeployedPaymaster paymaster = script.deploy(config());
 
         assertEq(paymaster.owner(), DEFAULT_SENDER, "deployer should still own it until accepted");
         assertEq(paymaster.pendingOwner(), multisigOwner, "handover not offered");
@@ -86,7 +88,7 @@ contract DeployPaymasterTest is Test {
         DeployPaymaster.Config memory cfg = config();
         cfg.owner = DEFAULT_SENDER;
 
-        VerifyingPaymaster paymaster = script.deploy(cfg);
+        IDeployedPaymaster paymaster = script.deploy(cfg);
 
         assertEq(paymaster.owner(), DEFAULT_SENDER, "owner should be the deployer");
         assertEq(paymaster.pendingOwner(), address(0), "should not offer ownership to itself");
@@ -95,9 +97,30 @@ contract DeployPaymasterTest is Test {
 
     /// The initial sponsorship signer must be registered, or the paymaster cannot attest anything.
     function test_registersTheInitialSigner() public {
-        VerifyingPaymaster paymaster = script.deploy(config());
+        IDeployedPaymaster paymaster = script.deploy(config());
 
         assertEq(paymaster.signerCount(), 1, "expected exactly one signer");
+        assertTrue(paymaster.isSigner(sponsorSigner), "configured signer not registered");
+    }
+
+    /// The multi-tenant contract is deployed, funded and staked by the same path. Asserted because
+    /// a backend configured with `paymasterKind: "tenant"` is unusable until one exists on chain,
+    /// and the two contracts share no ancestor that would make this true by construction.
+    function test_deploysTheMultiTenantPaymasterWhenAsked() public {
+        DeployPaymaster.Config memory cfg = config();
+        cfg.kind = DeployPaymaster.Kind.Tenant;
+
+        IDeployedPaymaster paymaster = script.deploy(cfg);
+
+        // It really is the other contract: `balanceOf` exists on no VerifyingPaymaster.
+        TenantPaymaster tenant = TenantPaymaster(payable(address(paymaster)));
+        assertEq(tenant.balanceOf(keccak256("t_acme")), 0, "a fresh tenant should hold nothing");
+        assertEq(tenant.totalTenantBalance(), 0);
+
+        // And the staking that ERC-7562 requires of it happened, exactly as for its sibling.
+        assertEq(entryPoint.getDepositInfo(address(paymaster)).stake, STAKE_WEI, "stake not registered");
+        assertEq(paymaster.getDeposit(), DEPOSIT_WEI, "deposit not registered");
+        assertEq(paymaster.pendingOwner(), multisigOwner, "handover not offered");
         assertTrue(paymaster.isSigner(sponsorSigner), "configured signer not registered");
     }
 
@@ -134,7 +157,7 @@ contract DeployPaymasterTest is Test {
         cfg.depositWei = 0;
         cfg.stakeWei = 0;
 
-        VerifyingPaymaster paymaster = script.deploy(cfg);
+        IDeployedPaymaster paymaster = script.deploy(cfg);
 
         assertEq(paymaster.getDeposit(), 0, "expected no deposit");
         assertEq(paymaster.pendingOwner(), multisigOwner, "handover not offered");

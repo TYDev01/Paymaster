@@ -7,35 +7,27 @@ import {
   PAYMASTER_POSTOP_GAS_OFFSET,
   PAYMASTER_VALIDATION_GAS_OFFSET,
 } from "./paymasterAndData.js";
+import {layoutFor, TENANT_LAYOUT, VERIFYING_LAYOUT, type PaymasterKind} from "./paymasterLayout.js";
 
 /**
- * EIP-712 domain. Must match `EIP712("VerifyingPaymaster", "1")` in the contract constructor.
- * `chainId` and `verifyingContract` are what bind an attestation to one chain and one deployment,
- * so a signature minted for Base cannot be replayed on Arbitrum or against a sibling paymaster.
+ * EIP-712 domain. The name must match `EIP712(name, "1")` in the contract's constructor, and it
+ * DIFFERS between the two paymasters — signing for one with the other's name produces a digest that
+ * recovers to a stranger. `chainId` and `verifyingContract` are what bind an attestation to one
+ * chain and one deployment, so a signature minted for Base cannot be replayed on Arbitrum or
+ * against a sibling paymaster.
  */
-export const SPONSORSHIP_DOMAIN_NAME = "VerifyingPaymaster";
 export const SPONSORSHIP_DOMAIN_VERSION = "1";
 
-/**
- * Must match `SPONSORSHIP_TYPEHASH` in VerifyingPaymaster.sol. Field order is part of the type
- * hash: reordering these silently changes the digest and invalidates every signature.
- */
-export const SPONSORSHIP_TYPES = {
-  Sponsorship: [
-    {name: "sender", type: "address"},
-    {name: "nonce", type: "uint256"},
-    {name: "initCodeHash", type: "bytes32"},
-    {name: "callDataHash", type: "bytes32"},
-    {name: "accountGasLimits", type: "bytes32"},
-    {name: "paymasterGasLimits", type: "uint256"},
-    {name: "preVerificationGas", type: "uint256"},
-    {name: "gasFees", type: "bytes32"},
-    {name: "validUntil", type: "uint48"},
-    {name: "validAfter", type: "uint48"},
-  ],
-} as const;
+/** @deprecated Prefer `layoutFor(kind).domainName`; kept for the single-tenant contract's callers. */
+export const SPONSORSHIP_DOMAIN_NAME = VERIFYING_LAYOUT.domainName;
 
-export interface SponsorshipDigestParams {
+/** Must match `SPONSORSHIP_TYPEHASH` in VerifyingPaymaster.sol. */
+export const SPONSORSHIP_TYPES = VERIFYING_LAYOUT.types;
+
+/** Must match `SPONSORSHIP_TYPEHASH` in TenantPaymaster.sol. */
+export const TENANT_SPONSORSHIP_TYPES = TENANT_LAYOUT.types;
+
+interface CommonDigestParams {
   /**
    * The operation being sponsored. `paymasterAndData` is read for its gas-limit bytes [20:52] and
    * must therefore already carry the prefix; the signature tail is not covered by the digest and
@@ -48,13 +40,18 @@ export interface SponsorshipDigestParams {
   readonly validAfter: number;
 }
 
+/** Discriminated for the same reason the codec is: see `PaymasterAndDataFields`. */
+export type SponsorshipDigestParams =
+  | (CommonDigestParams & {readonly kind: "verifying"})
+  | (CommonDigestParams & {readonly kind: "tenant"; readonly tenant: Hex});
+
 /**
  * Returned with a precise literal type rather than viem's `TypedDataDomain`, whose fields are all
  * optional. Every field here is always present, and callers should not have to narrow.
  */
-export function sponsorshipDomain(chainId: number, paymaster: Address) {
+export function sponsorshipDomain(chainId: number, paymaster: Address, kind: PaymasterKind = "verifying") {
   return {
-    name: SPONSORSHIP_DOMAIN_NAME,
+    name: layoutFor(kind).domainName,
     version: SPONSORSHIP_DOMAIN_VERSION,
     chainId,
     verifyingContract: paymaster,
@@ -80,26 +77,29 @@ export function paymasterGasLimitsFrom(paymasterAndData: Hex): bigint {
 
 /**
  * The EIP-712 digest the paymaster will recover a signer from. Equivalent to calling `getHash` on
- * the deployed contract; `differential.test.ts` asserts that equivalence against real bytecode.
+ * the deployed contract; `differential.test.ts` asserts that equivalence against real bytecode for
+ * both kinds.
  */
 export function sponsorshipDigest(params: SponsorshipDigestParams): Hex {
-  const {userOp, chainId, paymaster, validUntil, validAfter} = params;
+  const {userOp, chainId, paymaster, validUntil, validAfter, kind} = params;
+
+  const common = {
+    sender: userOp.sender,
+    nonce: userOp.nonce,
+    initCodeHash: keccak256(userOp.initCode),
+    callDataHash: keccak256(userOp.callData),
+    accountGasLimits: userOp.accountGasLimits,
+    paymasterGasLimits: paymasterGasLimitsFrom(userOp.paymasterAndData),
+    preVerificationGas: userOp.preVerificationGas,
+    gasFees: userOp.gasFees,
+    validUntil,
+    validAfter,
+  };
 
   return hashTypedData({
-    domain: sponsorshipDomain(chainId, paymaster),
-    types: SPONSORSHIP_TYPES,
+    domain: sponsorshipDomain(chainId, paymaster, kind),
+    types: layoutFor(kind).types,
     primaryType: "Sponsorship",
-    message: {
-      sender: userOp.sender,
-      nonce: userOp.nonce,
-      initCodeHash: keccak256(userOp.initCode),
-      callDataHash: keccak256(userOp.callData),
-      accountGasLimits: userOp.accountGasLimits,
-      paymasterGasLimits: paymasterGasLimitsFrom(userOp.paymasterAndData),
-      preVerificationGas: userOp.preVerificationGas,
-      gasFees: userOp.gasFees,
-      validUntil,
-      validAfter,
-    },
+    message: kind === "verifying" ? common : {...common, tenant: params.tenant},
   });
 }
