@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 #
-# Starts the whole project locally, from nothing to a working sponsorship.
+# Starts the whole project against ETHEREUM SEPOLIA, from nothing to a working sponsorship.
 #
-# The manual sequence this replaces is documented in the README, and every step of it exists for a
-# reason that is easy to forget at 2am:
+# THERE IS NO LOCAL CHAIN ANY MORE. anvil, deploy/local-setup.sh and the rundler chain.toml are
+# gone; the stack talks to a paymaster already deployed on Sepolia. That changes what this script
+# can and cannot do for you:
 #
-#   * the CHAIN must exist before the backend starts, because the backend validates CHAINS at boot
-#     and refuses a chain whose EntryPoint has no code;
-#   * the contracts must be DEPLOYED before that, because CHAINS names the paymaster address;
-#   * and the CHAINS the backend gets must point at `anvil:8545` on the compose network, not at the
-#     `127.0.0.1:8545` that local-setup writes for host tooling. Getting that one wrong produces a
-#     backend that boots and then fails every request.
+#   * it does NOT deploy contracts. A deploy costs real Sepolia ETH and is not something a boot
+#     script should do implicitly. Deploy once with contracts/script/DeployPaymaster.s.sol, and
+#     this script reads the address back out of the broadcast receipt.
+#   * it CANNOT reset state. On a devnet a bad deploy was fixed by wiping the chain; here it is
+#     on chain forever and the fix is to deploy again and update contracts/.env.
+#   * everything it needs that costs money — the paymaster's deposit, the bundler EOA's balance —
+#     is CHECKED at boot and reported, because the failure they cause otherwise (AA31, or bundles
+#     that are built and never land) points nowhere near the empty account that caused it.
 #
 # Usage:
 #   ./start.sh                 boot everything and leave it running
@@ -18,10 +21,11 @@
 #   ./start.sh status          what is up, and on which port
 #   ./start.sh --no-ui         backend stack only, no Next apps
 #   ./start.sh --monitoring    also start Prometheus, Grafana and the OTel collector
-#   ./start.sh --fresh         wipe the devnet chain and redeploy the contracts
+#   ./start.sh --skip-checks   do not read Sepolia at boot (offline, or the RPC is rate limiting)
 #
-# It is idempotent: running it twice does not redeploy contracts that are still on chain, and does
-# not reinstall dependencies that are already there.
+# It is idempotent: running it twice reinstalls nothing already installed and redeploys nothing.
+#
+# Reads contracts/.env for the deployed address and the money settings. See contracts/.env.example.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,7 +40,7 @@ BACKEND_PORT="${BACKEND_HOST_PORT:-3100}"
 
 WITH_UI=1
 WITH_MONITORING=0
-FRESH=0
+SKIP_CHECKS=0
 COMMAND="start"
 
 # "Is something listening" is a TCP question, and answering it over HTTP was wrong twice: once
@@ -54,8 +58,8 @@ while [ $# -gt 0 ]; do
     stop|status|start) COMMAND="$1"; shift ;;
     --no-ui) WITH_UI=0; shift ;;
     --monitoring) WITH_MONITORING=1; shift ;;
-    --fresh) FRESH=1; shift ;;
-    -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --skip-checks) SKIP_CHECKS=1; shift ;;
+    -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown argument: $1 (try --help)" ;;
   esac
 done
@@ -68,9 +72,12 @@ compose() {
   fi
 }
 
-# Compose refuses to do ANYTHING while `${CHAINS:?...}` and friends are unset — including starting
-# anvil, which is the very thing that has to run before those values can exist. So the calls made
-# before `.env` is written supply throwaway values from the environment instead.
+# Compose refuses to do ANYTHING while `${CHAINS:?...}` and friends are unset — including `ps` and
+# `down`, which stop and status need before `.env` has necessarily been written. So the calls made
+# before that supply throwaway values from the environment instead.
+#
+# BUNDLER_SIGNER_KEY and SEPOLIA_RPC_URL joined this list when the bundler stopped defaulting to
+# anvil: both are now `:?` in the compose file, so without them even `./start.sh stop` aborts.
 #
 # In a subshell, deliberately. Compose reads the shell environment at HIGHER precedence than
 # `.env`, so a leaked `CHAINS=[]` here would silently override the real config written later and
@@ -79,6 +86,8 @@ compose_bootstrap() {
   (
     export SPONSORSHIP_SIGNER_KEY="${SPONSORSHIP_SIGNER_KEY:-0x00}" \
            BOOTSTRAP_API_KEY="${BOOTSTRAP_API_KEY:-bootstrap}" \
+           BUNDLER_SIGNER_KEY="${BUNDLER_SIGNER_KEY:-0x00}" \
+           SEPOLIA_RPC_URL="${SEPOLIA_RPC_URL:-http://unset.invalid}" \
            CHAINS="${CHAINS:-[]}"
     compose "$@"
   )
@@ -150,15 +159,18 @@ log "checking tools"
 for tool in docker node npm jq; do
   command -v "${tool}" >/dev/null 2>&1 || fail "${tool} is required but not on PATH"
 done
-for tool in forge cast; do
-  command -v "${tool}" >/dev/null 2>&1 || fail "${tool} is required (install Foundry: https://getfoundry.sh)"
-done
+# `cast` only, and only for the Sepolia preflight — nothing here compiles or deploys any more.
+# --skip-checks makes it optional entirely.
+if [ "${SKIP_CHECKS}" -eq 0 ]; then
+  command -v cast >/dev/null 2>&1 \
+    || fail "cast is required for the Sepolia preflight (install Foundry: https://getfoundry.sh), or pass --skip-checks"
+fi
 docker compose version >/dev/null 2>&1 || fail "docker compose v2 is required"
 docker info >/dev/null 2>&1 || fail "the Docker daemon is not running"
 
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
 [ "${node_major}" -ge 22 ] || fail "Node >= 22 is required, found $(node -v)"
-step "docker, node $(node -v), foundry"
+step "docker, node $(node -v)"
 
 # ------------------------------------------------------------------------------------------------
 # dependencies
@@ -197,8 +209,8 @@ fi
 # compose network, so the host mapping is a convenience for psql and redis-cli alone.
 #
 # Anything ELSE that is occupied is a real conflict and is reported rather than worked around —
-# anvil's 8545 and the bundler's 3001 are addressed by name from the host, by local-setup and by
-# the SDK example, so silently moving them would break the thing this script exists to produce.
+# the bundler's 3001 is addressed by name from the host by the SDK example, so silently moving it
+# would break the thing this script exists to produce. (8545 used to be here too, for anvil.)
 pick_free_port() {
   local port="$1" limit=$((${1} + 20))
   while [ "${port}" -lt "${limit}" ]; do
@@ -231,7 +243,7 @@ export POSTGRES_HOST_PORT REDIS_HOST_PORT
 [ "${POSTGRES_HOST_PORT}" != "5432" ] && step "5432 is busy — postgres will be on :${POSTGRES_HOST_PORT}"
 [ "${REDIS_HOST_PORT}" != "6379" ] && step "6379 is busy — redis will be on :${REDIS_HOST_PORT}"
 
-for entry in "8545:anvil" "3001:the bundler" "${BACKEND_PORT}:the backend"; do
+for entry in "3001:the bundler" "${BACKEND_PORT}:the backend"; do
   port="${entry%%:*}"
   owner="${entry#*:}"
   if port_in_use "${port}"; then
@@ -246,92 +258,186 @@ for entry in "8545:anvil" "3001:the bundler" "${BACKEND_PORT}:the backend"; do
 done
 
 # ------------------------------------------------------------------------------------------------
-# the chain, and the contracts on it
+# the paymaster on Sepolia
 # ------------------------------------------------------------------------------------------------
+#
+# Read, never written. The deploy is a deliberate act that spends real ETH; this script's job is to
+# confirm what is already there and to fail LOUDLY when it is not, because every one of these
+# misconfigurations otherwise surfaces far from its cause.
 
-if [ "${FRESH}" -eq 1 ]; then
-  log "discarding the devnet chain (--fresh)"
-  compose_bootstrap rm -sf anvil >/dev/null 2>&1 || true
-  rm -f "${ROOT}/deploy/.env.local"
-fi
+CONTRACTS_ENV="${ROOT}/contracts/.env"
+[ -f "${CONTRACTS_ENV}" ] || fail "contracts/.env is missing — copy contracts/.env.example and deploy first"
 
-log "starting the chain"
-compose_bootstrap up -d anvil >"${LOG_DIR}/compose-anvil.log" 2>&1 || fail "could not start anvil — see ${LOG_DIR}/compose-anvil.log"
+# Sourced in a subshell and read back, so a stray line in contracts/.env cannot clobber this
+# script's own variables (it holds DEPLOYER_KEY, among other things we do not want in scope).
+read_contracts_env() { (set -a; . "${CONTRACTS_ENV}"; set +a; printf '%s' "${!1:-}"); }
 
-step "waiting for anvil on :8545"
-for _ in $(seq 1 60); do
-  if cast block-number --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1; then break; fi
-  sleep 1
-done
-cast block-number --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1 || fail "anvil did not become ready"
+PAYMASTER_ADDRESS="$(read_contracts_env PAYMASTER_ADDRESS)"
+PAYMASTER_KIND="$(read_contracts_env PAYMASTER_KIND)"
+PAYMASTER_SIGNER="$(read_contracts_env PAYMASTER_SIGNER)"
+STAKE_WEI="$(read_contracts_env STAKE_WEI)"
+SEPOLIA_RPC_URL="${SEPOLIA_RPC_URL:-$(read_contracts_env RPC_URL)}"
 
-# Idempotent: only deploy when there is nothing deployed. `deploy/.env.local` alone is not proof —
-# the chain may have been wiped since — so the paymaster address is checked for code.
-needs_deploy=1
-if [ -f "${ROOT}/deploy/.env.local" ]; then
-  existing_paymaster="$(grep -o '"paymaster":"[^"]*"' "${ROOT}/deploy/.env.local" | head -1 | cut -d'"' -f4 || true)"
-  if [ -n "${existing_paymaster}" ]; then
-    code="$(cast code "${existing_paymaster}" --rpc-url http://127.0.0.1:8545 2>/dev/null || echo 0x)"
-    [ "${code}" != "0x" ] && [ -n "${code}" ] && needs_deploy=0
+# The address is preferably not typed at all: the broadcast receipt is what actually happened on
+# chain, so reading it there cannot disagree with the deployment the way a transcribed address can.
+if [ -z "${PAYMASTER_ADDRESS}" ]; then
+  RECEIPT="${ROOT}/contracts/broadcast/DeployPaymaster.s.sol/11155111/run-latest.json"
+  if [ -f "${RECEIPT}" ]; then
+    PAYMASTER_ADDRESS="$(jq -r '[.transactions[] | select(.transactionType=="CREATE")] | last | .contractAddress // empty' "${RECEIPT}")"
+    [ -n "${PAYMASTER_ADDRESS}" ] && step "paymaster read from the broadcast receipt: ${PAYMASTER_ADDRESS}"
   fi
 fi
+[ -n "${PAYMASTER_ADDRESS}" ] \
+  || fail "no paymaster address: set PAYMASTER_ADDRESS in contracts/.env, or deploy so a broadcast receipt exists"
+[ -n "${SEPOLIA_RPC_URL}" ] || fail "no RPC: set SEPOLIA_RPC_URL, or RPC_URL in contracts/.env"
 
-if [ "${needs_deploy}" -eq 1 ]; then
-  log "deploying contracts to the devnet"
-  "${ROOT}/deploy/local-setup.sh" >"${LOG_DIR}/local-setup.log" 2>&1 \
-    || fail "contract deployment failed — see ${LOG_DIR}/local-setup.log"
-  step "EntryPoint, factory, paymaster (funded + staked), SimpleAccount"
+PAYMASTER_KIND="${PAYMASTER_KIND:-verifying}"
+STAKE_WEI="${STAKE_WEI:-21000000000000000}"
+export SEPOLIA_RPC_URL PAYMASTER_ADDRESS PAYMASTER_KIND STAKE_WEI
+
+if [ "${SKIP_CHECKS}" -eq 1 ]; then
+  log "skipping the Sepolia preflight (--skip-checks)"
 else
-  log "contracts already deployed on this chain, skipping"
+  log "checking Sepolia"
+
+  chain_id="$(cast chain-id --rpc-url "${SEPOLIA_RPC_URL}" 2>/dev/null || true)"
+  [ "${chain_id}" = "11155111" ] \
+    || fail "RPC ${SEPOLIA_RPC_URL} reports chain id '${chain_id:-unreachable}', expected 11155111"
+
+  # A paymaster address with no code is the single most confusing failure mode here: the backend
+  # validates its CHAINS at boot and would refuse to start, naming the chain and not the typo.
+  code="$(cast code "${PAYMASTER_ADDRESS}" --rpc-url "${SEPOLIA_RPC_URL}" 2>/dev/null || echo 0x)"
+  [ "${code}" != "0x" ] && [ -n "${code}" ] \
+    || fail "no contract at ${PAYMASTER_ADDRESS} on Sepolia — wrong address, or the deploy did not land"
+  step "paymaster ${PAYMASTER_ADDRESS} (${PAYMASTER_KIND})"
+
+  # Deposit pays for sponsored gas; at zero EVERY sponsored operation fails AA31 and nothing in the
+  # backend's own logs says why.
+  deposit="$(cast call "${PAYMASTER_ADDRESS}" 'getDeposit()(uint256)' --rpc-url "${SEPOLIA_RPC_URL}" 2>/dev/null | awk '{print $1}' || echo 0)"
+  if [ "${deposit:-0}" = "0" ]; then
+    warn "the paymaster's deposit is ZERO — every sponsored operation will fail AA31"
+    warn "  cast send ${PAYMASTER_ADDRESS} 'deposit()' --value 0.01ether --rpc-url \"\${SEPOLIA_RPC_URL}\" --private-key <key>"
+  else
+    step "deposit $(cast from-wei "${deposit}") ETH"
+  fi
+
+  # The stake is what makes the bundler ACCEPT the paymaster at all, and MIN_STAKE_VALUE is what we
+  # tell the bundler to demand. If the floor is above what is actually staked, rundler rejects every
+  # operation with -32502 — before anything reaches the chain, and blaming the bundler.
+  stake="$(cast call 0x0000000071727De22E5E9d8BAf0edAc6f37da032 \
+    'getDepositInfo(address)(uint256,bool,uint112,uint32,uint48)' "${PAYMASTER_ADDRESS}" \
+    --rpc-url "${SEPOLIA_RPC_URL}" 2>/dev/null | sed -n '3p' | awk '{print $1}' || echo 0)"
+  MIN_STAKE_VALUE="${MIN_STAKE_VALUE:-${STAKE_WEI}}"
+  export MIN_STAKE_VALUE
+  if [ -n "${stake}" ] && [ "${stake}" != "0" ]; then
+    step "stake $(cast from-wei "${stake}") ETH, bundler floor $(cast from-wei "${MIN_STAKE_VALUE}") ETH"
+    python3 -c "import sys; sys.exit(0 if int('${stake}') >= int('${MIN_STAKE_VALUE}') else 1)" \
+      || fail "staked ${stake} wei is BELOW the bundler floor ${MIN_STAKE_VALUE} wei — rundler would reject every operation (-32502)"
+  else
+    warn "the paymaster is NOT STAKED — a conforming bundler rejects every operation (-32502)"
+  fi
+
+  # The bundler EOA pays for the bundles it submits, in real Sepolia ETH. Empty, rundler runs
+  # perfectly happily and simply never lands anything.
+  BUNDLER_SIGNER_KEY="${BUNDLER_SIGNER_KEY:-$(read_contracts_env BUNDLER_SIGNER_KEY)}"
+  export BUNDLER_SIGNER_KEY
+  if [ -n "${BUNDLER_SIGNER_KEY:-}" ]; then
+    bundler_eoa="$(cast wallet address --private-key "${BUNDLER_SIGNER_KEY}" 2>/dev/null || true)"
+    if [ -n "${bundler_eoa}" ]; then
+      bundler_bal="$(cast balance "${bundler_eoa}" --rpc-url "${SEPOLIA_RPC_URL}" 2>/dev/null || echo 0)"
+      if [ "${bundler_bal}" = "0" ]; then
+        warn "the bundler EOA ${bundler_eoa} has NO Sepolia ETH — it will build bundles and land none"
+      else
+        step "bundler EOA ${bundler_eoa}, $(cast from-wei "${bundler_bal}") ETH"
+      fi
+    fi
+  fi
 fi
 
 # ------------------------------------------------------------------------------------------------
 # the backend's environment
 # ------------------------------------------------------------------------------------------------
 #
-# local-setup writes host-facing values. The backend runs INSIDE the compose network, where anvil is
-# `anvil:8545` and not `127.0.0.1:8545`. Rewriting that here is the step people forget, and its
-# symptom — a backend that boots fine and then fails every sponsorship — points nowhere near it.
+# CHAINS is GENERATED from what was just read off chain, never transcribed. `paymasterKind` must
+# match the contract that is actually deployed — the two paymasters use different EIP-712 domains,
+# so a mismatch fails every sponsorship with an opaque AA34 — and `minStakeWei` must not exceed the
+# real stake, or the backend reports a correctly staked chain as unhealthy.
 log "writing .env for the stack"
-if [ ! -f "${ROOT}/deploy/.env.local" ]; then
-  fail "deploy/.env.local is missing; run ./start.sh --fresh"
-fi
 
 python3 <<'PY'
-import pathlib, secrets
+import json, os, pathlib, secrets
 
 # cwd is the repo root: the script cd'd there at the top.
-src = pathlib.Path("deploy/.env.local").read_text()
 dst = pathlib.Path(".env")
 
-# Only the keys the compose stack needs. Copying the whole file would drag host-only values
-# (ACCOUNT_OWNER_KEY, PAYMASTER_URL) into the backend's environment, where they mean nothing.
-import os
+paymaster = os.environ["PAYMASTER_ADDRESS"]
+kind      = os.environ.get("PAYMASTER_KIND", "verifying")
+rpc_url   = os.environ["SEPOLIA_RPC_URL"]
+stake_wei = int(os.environ.get("MIN_STAKE_VALUE") or os.environ.get("STAKE_WEI") or 0)
 
-wanted = ["SPONSORSHIP_SIGNER_KEY", "BOOTSTRAP_API_KEY", "CHAINS"]
-# Written into .env rather than left in the shell, so `docker compose` run BY HAND afterwards binds
-# the same ports this script chose. Otherwise the next `docker compose up` reverts to 5432 and
-# fails exactly the way this run just did.
-host_ports = {k: os.environ[k] for k in ("POSTGRES_HOST_PORT", "REDIS_HOST_PORT") if os.environ.get(k)}
-values = {}
-for line in src.splitlines():
-    if "=" not in line or line.lstrip().startswith("#"):
-        continue
-    key, _, value = line.partition("=")
-    key = key.strip()
-    if key in wanted:
-        values[key] = value.strip()
+# GENERATED, not transcribed. A hand-written CHAINS is how a paymaster ends up signing attestations
+# for a contract that is not the one deployed — which fails per operation, on chain, as an AA34
+# that names nothing useful.
+#
+# minStakeWei is the backend's health threshold, NOT a requirement it imposes on the chain:
+# ChainAdapter reports stakeBelowThreshold when the real stake is under it. Setting it to the stake
+# we actually placed is the only value that is true; the 1 ETH from the mainnet examples would
+# report this correctly-staked chain as permanently unhealthy.
+chains = [{
+    "chainId": 11155111,
+    "name": "Ethereum Sepolia",
+    "rpcUrls": [rpc_url],
+    "entryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    "paymaster": paymaster,
+    "paymasterKind": kind,
+    "explorerUrl": "https://sepolia.etherscan.io",
+    "nativeCurrency": {"symbol": "ETH", "decimals": 18},
+    # A tenth of the stake: low enough not to cry wolf on a testnet deposit, high enough that
+    # FundingMonitor warns before the deposit hits zero and every operation starts failing AA31.
+    "minDepositWei": str(max(stake_wei // 10, 10**15)),
+    "minStakeWei": str(stake_wei),
+    "enabled": True,
+}]
 
-chains = values.get("CHAINS", "")
-# The one rewrite that matters. Both quoted forms, because local-setup single-quotes this value.
-chains = chains.replace("http://127.0.0.1:8545", "http://anvil:8545").replace("http://localhost:8545", "http://anvil:8545")
-values["CHAINS"] = chains
+values = {"CHAINS": json.dumps(chains, separators=(",", ":"))}
+
+# The signer whose ADDRESS the deployed paymaster stores. Sourced from contracts/.env, where the
+# deploy put it, so the pair cannot drift apart — a mismatch here is an on-chain AA34 on every
+# sponsorship, and it points at the signature rather than at the key.
+contracts_env = {}
+ce = pathlib.Path("contracts/.env")
+if ce.exists():
+    for line in ce.read_text().splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, _, v = line.partition("=")
+            contracts_env[k.strip()] = v.strip()
+
+signer_key = os.environ.get("SPONSORSHIP_SIGNER_KEY") or contracts_env.get("SPONSORSHIP_SIGNER_KEY_FOR_BACKEND", "")
+if signer_key:
+    values["SPONSORSHIP_SIGNER_KEY"] = signer_key
+
+# The bundler EOA that pays for bundles. Carried through so `docker compose` run BY HAND afterwards
+# gets the same one — compose now hard-fails without it rather than falling back to an anvil key.
+bundler_key = os.environ.get("BUNDLER_SIGNER_KEY") or contracts_env.get("BUNDLER_SIGNER_KEY", "")
+if bundler_key:
+    values["BUNDLER_SIGNER_KEY"] = bundler_key
+
+values["SEPOLIA_RPC_URL"] = rpc_url
+values["MIN_STAKE_VALUE"] = str(stake_wei)
+
+existing = dst.read_text() if dst.exists() else ""
+def previous(key, minlen=0):
+    return next((l.split("=", 1)[1] for l in existing.splitlines()
+                 if l.startswith(key + "=") and len(l) > minlen), None)
+
+# Not a devnet value any more: this key authenticates the admin API of a stack pointed at a public
+# chain. Generated once and then kept, so it does not rotate on every boot.
+values["BOOTSTRAP_API_KEY"] = os.environ.get("BOOTSTRAP_API_KEY") or previous("BOOTSTRAP_API_KEY") or ("pm_" + secrets.token_urlsafe(32))
 
 # Dashboard sign-in needs the backend to verify tokens from the SAME Privy app the browser used,
-# and to hold a secret for the sessions it issues. Both are derived rather than asked for: the app
-# id is already in web/.env.local, and the session secret is a devnet value nobody should have to
-# invent. Without them /auth/* answers 503 and the dashboard cannot sign anyone in — which is a
-# confusing wall to hit when the browser side is configured and looks fine.
+# and to hold a secret for the sessions it issues. The app id is already in web/.env.local. Without
+# them /auth/* answers 503 and the dashboard cannot sign anyone in — a confusing wall to hit when
+# the browser side is configured and looks fine.
 identity = {}
 web_env = pathlib.Path("web/.env.local")
 if web_env.exists():
@@ -341,44 +447,43 @@ if web_env.exists():
             if app_id:
                 identity["PRIVY_APP_ID"] = app_id
 
-existing = dst.read_text() if dst.exists() else ""
-
 if "PRIVY_APP_ID" in identity:
     # Reused across restarts, so a session survives one. Regenerating would sign everyone out on
     # every boot, which reads as a login bug rather than as a fresh secret.
-    previous_secret = next(
-        (l.split("=", 1)[1] for l in existing.splitlines() if l.startswith("ADMIN_JWT_SECRET=") and len(l) > 49),
-        None,
-    )
-    identity["ADMIN_JWT_SECRET"] = previous_secret or secrets.token_urlsafe(48)
-    # A local devnet is exactly where signing yourself up should work without an operator.
+    identity["ADMIN_JWT_SECRET"] = previous("ADMIN_JWT_SECRET", 49) or secrets.token_urlsafe(48)
     identity["TENANT_SELF_SIGNUP"] = "true"
-preserved = [
-    line for line in existing.splitlines()
-    if "=" in line
-    and line.split("=", 1)[0].strip() not in wanted
-    and line.split("=", 1)[0].strip() not in host_ports
-    and line.split("=", 1)[0].strip() not in identity
-    and not line.startswith("# generated")
-]
 
-out = ["# generated by ./start.sh — devnet values from deploy/.env.local, rewritten for the",
-       "# compose network (anvil:8545 rather than 127.0.0.1:8545). Safe to edit; regenerated on boot."]
-out += [f"{k}={values[k]}" for k in wanted if k in values]
+# Written into .env rather than left in the shell, so `docker compose` run BY HAND afterwards binds
+# the same ports this script chose.
+host_ports = {k: os.environ[k] for k in ("POSTGRES_HOST_PORT", "REDIS_HOST_PORT") if os.environ.get(k)}
+
+managed = set(values) | set(host_ports) | set(identity)
+preserved = [line for line in existing.splitlines()
+             if "=" in line
+             and line.split("=", 1)[0].strip() not in managed
+             and not line.startswith("# generated")]
+
+out = ["# generated by ./start.sh — Ethereum Sepolia (11155111). CHAINS is built from the paymaster",
+       "# read off chain, not transcribed. Safe to edit; regenerated on boot."]
+out += [f"{k}={v}" for k, v in values.items()]
 out += [f"{k}={v}" for k, v in host_ports.items()]
 out += [f"{k}={v}" for k, v in identity.items()]
 if preserved:
     out += ["", "# kept from the previous .env"] + preserved
 dst.write_text("\n".join(out) + "\n")
+
+missing = [k for k in ("SPONSORSHIP_SIGNER_KEY", "BUNDLER_SIGNER_KEY") if k not in values]
 note = " + dashboard sign-in" if "PRIVY_APP_ID" in identity else " (no PRIVY_APP_ID in web/.env.local)"
-print(f"  · .env written ({len(values)} devnet values{note})")
+print(f"  \u00b7 .env written for Sepolia{note}")
+for k in missing:
+    print(f"  \u00b7 MISSING {k} — the stack will not start without it")
 PY
 
 # ------------------------------------------------------------------------------------------------
 # the stack
 # ------------------------------------------------------------------------------------------------
 
-log "starting postgres, redis, bundler and the backend"
+log "starting postgres, redis, the Sepolia bundler and the backend"
 # `--build`, always. `docker compose up -d` reuses whatever image exists, so after editing the
 # backend you get the OLD code with no indication of it — which cost an afternoon here: routes that
 # demonstrably existed in the source returned 404 from a container built before they were written.
@@ -441,7 +546,7 @@ fi
 # what you have
 # ------------------------------------------------------------------------------------------------
 
-API_KEY="$(grep -E '^BOOTSTRAP_API_KEY=' "${ROOT}/deploy/.env.local" | cut -d= -f2- || true)"
+API_KEY="$(grep -E '^BOOTSTRAP_API_KEY=' "${ROOT}/.env" | tail -1 | cut -d= -f2- || true)"
 
 echo
 log "up"
@@ -454,7 +559,8 @@ printf '  %-28s %s\n' "Bundler" "http://localhost:3001"
 [ "${WITH_MONITORING}" -eq 1 ] && printf '  %-28s %s\n' "Grafana" "http://localhost:3002"
 [ "${WITH_MONITORING}" -eq 1 ] && printf '  %-28s %s\n' "Prometheus" "http://localhost:9090"
 echo
-[ -n "${API_KEY}" ] && printf '  %-28s %s\n' "Devnet API key" "${API_KEY}"
+[ -n "${API_KEY}" ] && printf '  %-28s %s\n' "API key" "${API_KEY}"
+printf '  %-28s %s\n' "Paymaster (Sepolia)" "https://sepolia.etherscan.io/address/${PAYMASTER_ADDRESS}"
 echo
 printf '  End-to-end sponsorship:  \033[1m(cd sdk && npx tsx examples/sponsor-and-send.ts)\033[0m\n'
 printf '  Logs:                    %s\n' "${LOG_DIR}"

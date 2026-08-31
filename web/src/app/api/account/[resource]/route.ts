@@ -70,12 +70,19 @@ async function proxy(request: Request, resource: string, method: "GET" | "POST")
 
   // Lists arrive in a named envelope so a response can carry a caveat alongside its rows — which
   // `/admin/sponsorships` does. Unwrapping keeps the UI working with arrays while preserving it.
-  if (route.key === undefined) return NextResponse.json({data: result.data});
-  const rows = result.data[route.key];
-  return NextResponse.json({
-    data: Array.isArray(rows) ? rows : [],
-    ...(typeof result.data["note"] === "string" ? {note: result.data["note"]} : {}),
-  });
+  //
+  // GET only, and that qualifier is load-bearing. `POST /admin/keys` answers with a single created
+  // key rather than a list, and it is the one response in the system that ever carries a secret.
+  // Looking for a `keys` array in it finds nothing, and the `[]` fallback below would then discard
+  // the secret the customer has exactly one chance to read.
+  if (method === "GET" && route.key !== undefined) {
+    const rows = result.data[route.key];
+    return NextResponse.json({
+      data: Array.isArray(rows) ? rows : [],
+      ...(typeof result.data["note"] === "string" ? {note: result.data["note"]} : {}),
+    });
+  }
+  return NextResponse.json({data: result.data});
 }
 
 export async function GET(request: Request, context: {params: Promise<{resource: string}>}) {

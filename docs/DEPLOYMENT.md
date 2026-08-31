@@ -97,7 +97,10 @@ cast call <paymaster> "owner()(address)" --rpc-url $RPC_URL   # must be the mult
 | **Deposit** | Pays for sponsored gas | At zero, every operation fails AA31 |
 | **Stake** | Permits reading own storage during validation (ERC-7562) | Unstaked, conforming bundlers reject every operation (rundler: -32502) |
 
-The 1 ETH / 1 day defaults match rundler's minimums. **Confirm your bundler's requirements before
+The 0.021 ETH / 1 day defaults are testnet-sized and sit BELOW rundler's stock 1 ETH minimum,
+deliberately: on a testnet the stake comes out of a faucet. A bundler you run must then be started
+with `--min_stake_value 21000000000000000`; a stock or public one rejects the paymaster outright
+with -32502, before any operation reaches the chain. **Confirm your bundler's requirements before
 deploying** — they are the bundler's policy, not consensus, and other bundlers differ.
 
 The unstake delay is a real commitment: withdrawing stake requires unlocking and then waiting it

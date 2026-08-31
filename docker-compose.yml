@@ -49,45 +49,36 @@ services:
 
   # A local chain for development. In a real deployment this is replaced by RPC endpoints in the
   # CHAINS config; nothing else in the stack changes.
-  anvil:
-    image: ghcr.io/foundry-rs/foundry:latest
-    entrypoint: ["anvil"]
-    command: ["--host", "0.0.0.0", "--port", "8545", "--chain-id", "31337", "--silent"]
-    ports:
-      - "127.0.0.1:${ANVIL_HOST_PORT:-8545}:8545"
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          cast block-number --rpc-url http://127.0.0.1:8545 > /dev/null 2>&1
-      interval: 2s
-      timeout: 3s
-      retries: 30
-
   bundler:
     image: alchemyplatform/rundler:v0.11.0
-    depends_on:
-      anvil:
-        condition: service_healthy
     environment:
-      # Rundler's chain spec pins the EntryPoint per version. For a real chain, drop CHAIN_SPEC and
-      # set NETWORK (ethereum, base, arbitrum, ...) — the canonical v0.7 EntryPoint is the same
-      # address on every chain, which is what makes chain onboarding configuration-only.
-      CHAIN_SPEC: /config/chain.toml
-      NODE_HTTP: http://anvil:8545
+      # A built-in rundler chain spec, which is why there is no chain.toml any more: the old one
+      # existed ONLY because rundler ships no spec for chain id 31337. Its own comment said to
+      # delete it and set NETWORK for a real chain, and that is what this is.
+      NETWORK: ethereum_sepolia
+      # A real Sepolia endpoint. There is no anvil to fall back to, so an unset or rate-limited
+      # value here is a bundler that starts and then serves nothing — prefer a provider endpoint
+      # to a public one, because rundler polls this hard.
+      NODE_HTTP: ${SEPOLIA_RPC_URL:?set SEPOLIA_RPC_URL in .env}
       ENABLED_ENTRY_POINTS: v0.7
       RPC_PORT: "3001"
       RPC_HOST: 0.0.0.0
       METRICS_PORT: "8081"
-      # The EOA that submits bundles. Needs native balance. In production this is a KMS key
-      # (rundler supports --signer.aws_kms_key_ids), never an inline private key.
-      SIGNER_PRIVATE_KEYS: ${BUNDLER_SIGNER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}
+      # THE REASON THIS IS HERE. Rundler's stock minimum is 1 ETH, and the Sepolia paymaster is
+      # staked 0.021 — a testnet-sized number, because the stake comes out of a faucet. Left at
+      # the default, rundler rejects every single operation with -32502 before it reaches the
+      # chain, and the error names the bundler rather than the stake. Must be <= the on-chain
+      # stake; see STAKE_WEI in contracts/.env.
+      MIN_STAKE_VALUE: "${MIN_STAKE_VALUE:-21000000000000000}"
+      # The EOA that submits bundles, and PAYS FOR THEM in real Sepolia ETH. There is deliberately
+      # no default: the old one was anvil's well-known key, which holds nothing on a public chain,
+      # so a missing value used to produce a bundler that ran and silently landed no bundle. In
+      # production this is a KMS key (rundler supports --signer.aws_kms_key_ids), never inline.
+      SIGNER_PRIVATE_KEYS: ${BUNDLER_SIGNER_KEY:?set BUNDLER_SIGNER_KEY in .env - a FUNDED Sepolia EOA}
       # UNSAFE is deliberately NOT set. Safe mode enforces the ERC-7562 storage rules, which is
       # what requires our paymaster to be staked. Running unsafe here would hide a misconfiguration
       # that every production bundler would then reject.
     command: ["node"]
-    volumes:
-      - ./deploy/rundler:/config:ro
     ports:
       - "127.0.0.1:${BUNDLER_HOST_PORT:-3001}:3001"
       - "127.0.0.1:${BUNDLER_METRICS_HOST_PORT:-8081}:8081"

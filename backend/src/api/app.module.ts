@@ -338,6 +338,8 @@ export async function buildDependencies(
           maxSkewSeconds: env.REQUEST_SIGNING_MAX_SKEW_SECONDS,
         });
 
+  const privyLogger = new Logger("privy");
+
   // Dashboard sign-in needs three things: a provider to verify the person, somewhere to look up
   // what they may act within, and a signer for the session. Missing any one of them disables it,
   // and the endpoints say so rather than half-working.
@@ -345,12 +347,31 @@ export async function buildDependencies(
     env.PRIVY_APP_ID === undefined || pool === undefined || jwt === undefined
       ? undefined
       : new TenantSessionService(
-          new PrivyIdentityProvider({
-            appId: env.PRIVY_APP_ID,
-            jwksUrl: env.PRIVY_JWKS_URL,
-            issuer: env.PRIVY_ISSUER,
-            cacheTtlMs: env.PRIVY_JWKS_CACHE_MS,
-          }),
+          new PrivyIdentityProvider(
+            {
+              appId: env.PRIVY_APP_ID,
+              jwksUrl: env.PRIVY_JWKS_URL,
+              issuer: env.PRIVY_ISSUER,
+              cacheTtlMs: env.PRIVY_JWKS_CACHE_MS,
+            },
+            {
+              // An empty cache means nobody can sign in at all, so the two cases are logged at
+              // different levels: one is a degradation, the other is an outage.
+              onError: (error, cachedKeys) => {
+                const detail = `${error.message}${causeCode(error)}`;
+                if (cachedKeys === 0) {
+                  privyLogger.error(
+                    `could not fetch the Privy JWKS and no keys are cached: every sign-in will be ` +
+                      `refused until this succeeds (${detail})`,
+                  );
+                } else {
+                  privyLogger.warn(
+                    `could not refresh the Privy JWKS; continuing with ${cachedKeys} cached key(s) (${detail})`,
+                  );
+                }
+              },
+            },
+          ),
           new TenantRepository(pool),
           jwt,
           {allowSelfSignup: env.TENANT_SELF_SIGNUP},
@@ -577,4 +598,16 @@ function buildApiKeyStore(env: Env): ApiKeyStore {
       lastUsedAt: undefined,
     },
   ]);
+}
+
+/**
+ * The errno behind a failed `fetch`, when there is one.
+ *
+ * `fetch` reports every transport failure as the same "fetch failed", and the cause carries the
+ * part that distinguishes a DNS blip (`EAI_AGAIN`) from a refused connection or a timeout. Without
+ * it the log names the symptom and not the fault.
+ */
+function causeCode(error: Error): string {
+  const code = (error as {cause?: {code?: string}}).cause?.code;
+  return code === undefined ? "" : `: ${code}`;
 }

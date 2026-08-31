@@ -43,8 +43,14 @@ interface IDeployedPaymaster {
 ///        - STAKE is mandatory for THIS paymaster: it reads its own storage during validation,
 ///          which ERC-7562 permits only for a staked entity. An unstaked deployment is silently
 ///          rejected by every conforming bundler (measured: rundler returns -32502). The minimums
-///          are the bundler's policy, not consensus — 1 ETH / 1 day is rundler's default, so the
-///          defaults here match it. Verify your target bundler's requirement before production.
+///          are the bundler's policy, not consensus — rundler's stock default is 1 ETH / 1 day.
+///
+///          THE DEFAULT HERE IS DELIBERATELY BELOW THAT: 0.021 ether, sized for a testnet where
+///          the stake comes out of a faucet. It buys a working deploy on a bundler you control
+///          and configure (`--min_stake_value 21000000000000000`), and NOTHING on a stock or
+///          public one — which rejects it with -32502 before any operation reaches the chain.
+///          Raise it to at least the bundler's minimum for production; verify that requirement
+///          rather than inheriting this number.
 ///
 /// @dev OWNERSHIP HANDOVER. `addStake` is `onlyOwner`, so the paymaster cannot be staked by anyone
 ///      but its owner. It is therefore deployed owned by the DEPLOYER, funded and staked, and only
@@ -74,7 +80,7 @@ interface IDeployedPaymaster {
 ///        PAYMASTER_OWNER  (required — should be a multisig in production)
 ///        PAYMASTER_SIGNER (required — the sponsorship signer's address)
 ///        DEPOSIT_WEI      (default 1 ether)
-///        STAKE_WEI        (default 1 ether)
+///        STAKE_WEI        (default 0.021 ether — BELOW rundler's stock minimum, see above)
 ///        UNSTAKE_DELAY_SEC(default 86400)
 ///        PAYMASTER_KIND   (default "verifying"; "tenant" for the multi-tenant contract)
 contract DeployPaymaster is Script {
@@ -116,7 +122,7 @@ contract DeployPaymaster is Script {
             owner: vm.envAddress("PAYMASTER_OWNER"),
             signer: vm.envAddress("PAYMASTER_SIGNER"),
             depositWei: vm.envOr("DEPOSIT_WEI", uint256(1 ether)),
-            stakeWei: vm.envOr("STAKE_WEI", uint256(1 ether)),
+            stakeWei: vm.envOr("STAKE_WEI", uint256(0.021 ether)),
             unstakeDelaySec: uint32(vm.envOr("UNSTAKE_DELAY_SEC", uint256(86_400)))
         });
     }

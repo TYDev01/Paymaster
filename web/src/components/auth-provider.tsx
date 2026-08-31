@@ -159,12 +159,22 @@ function SessionBridge({children}: {children: ReactNode}) {
         const result = await post<{tenants: TenantView[]}>("/api/auth/tenants", {token});
         if (cancelled) return;
 
-        setMemberships(result.tenants);
+        // Both requests finish BEFORE anything is written to state, and that ordering is the point.
+        // `memberships` is a dependency of this effect, so writing it here used to tear the effect
+        // down mid-flight: the teardown set `cancelled`, and the `setSession` and `setWorking(false)`
+        // waiting on the next await were both skipped. Two requests returned 200 and the page sat on
+        // "Loading your account…" with no error and nothing to click.
+        //
         // Exactly one organisation is not a choice, so do not make it one.
-        if (result.tenants.length === 1) {
-          const created = await post<Session>("/api/auth/session", {token, tenantId: result.tenants[0]!.id});
-          if (!cancelled) setSession(created);
-        }
+        const created =
+          result.tenants.length === 1
+            ? await post<Session>("/api/auth/session", {token, tenantId: result.tenants[0]!.id})
+            : undefined;
+        if (cancelled) return;
+
+        // No await between here and the `finally`, so this effect's own writes cannot cancel it.
+        setMemberships(result.tenants);
+        if (created !== undefined) setSession(created);
       } catch (cause) {
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
       } finally {

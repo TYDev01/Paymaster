@@ -62,6 +62,34 @@ const DEFAULT_CACHE_TTL_MS = 10 * 60 * 1000;
  */
 const MIN_REFRESH_INTERVAL_MS = 2_000;
 
+/**
+ * Attempts per refresh, and the pause between them.
+ *
+ * One attempt was not enough in practice. On Alpine (musl), `getaddrinfo` resolves A and AAAA in
+ * parallel against Docker's embedded resolver and intermittently gives up with `EAI_AGAIN` after
+ * its own five-second timeout. A cold cache plus one such blip rejected EVERY token as
+ * `unknown-key` — a complete sign-in outage caused by a name lookup that works on the next ask.
+ *
+ * Two attempts rather than more, because this runs inside a request someone is waiting on: the
+ * dashboard abandons the backend at eight seconds, and two attempts plus the pause stay inside that
+ * budget. The floor above still bounds how often an unknown `kid` can reach the provider, so this
+ * costs at most one extra request per refresh, not per token.
+ */
+const REFRESH_ATTEMPTS = 2;
+const RETRY_PAUSE_MS = 150;
+
+/**
+ * Timeout for ONE attempt, not for the refresh.
+ *
+ * Deliberately shorter than musl's own five-second DNS timeout: when a lookup has already stalled,
+ * abandoning it and asking again resolves sooner than waiting out a failure. A healthy fetch takes
+ * a few hundred milliseconds and a cold one a little over two seconds, so this leaves real margin.
+ */
+const DEFAULT_TIMEOUT_MS = 3_500;
+
+/** A 4xx from the JWKS endpoint. Repeating an ill-formed request unchanged cannot help. */
+class JwksClientError extends Error {}
+
 export class PrivyIdentityProvider implements IdentityProvider {
   readonly #options: Required<Pick<PrivyOptions, "appId">> & {
     jwksUrl: string;
@@ -72,24 +100,45 @@ export class PrivyIdentityProvider implements IdentityProvider {
   readonly #fetchJwks: JwksFetcher;
   readonly #now: () => number;
   readonly #nowMs: () => number;
+  readonly #sleep: (ms: number) => Promise<void>;
+  readonly #onError: ((error: Error, cachedKeys: number) => void) | undefined;
 
   #keys = new Map<string, KeyObject>();
   #fetchedAt = 0;
   #inFlight: Promise<void> | undefined;
 
-  constructor(options: PrivyOptions, deps: {fetchJwks?: JwksFetcher; now?: () => number; nowMs?: () => number} = {}) {
+  constructor(
+    options: PrivyOptions,
+    deps: {
+      fetchJwks?: JwksFetcher;
+      now?: () => number;
+      nowMs?: () => number;
+      /** Injected so a test exercises the retry without sleeping through the pause. */
+      sleep?: (ms: number) => Promise<void>;
+      /**
+       * Called when a refresh fails, with how many keys remain cached.
+       *
+       * Exists because the failure used to be swallowed entirely: with an empty cache the only
+       * visible symptom was every token being rejected as `unknown-key`, which points nowhere near
+       * the JWKS endpoint and took a long afternoon to trace back to a DNS blip.
+       */
+      onError?: (error: Error, cachedKeys: number) => void;
+    } = {},
+  ) {
     this.#options = {
       appId: options.appId,
       jwksUrl: options.jwksUrl ?? `https://auth.privy.io/api/v1/apps/${options.appId}/jwks.json`,
       issuer: options.issuer ?? DEFAULT_ISSUER,
       cacheTtlMs: options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS,
-      timeoutMs: options.timeoutMs ?? 5_000,
+      timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     };
     this.#fetchJwks = deps.fetchJwks ?? (() => this.#defaultFetch());
     this.#now = deps.now ?? (() => Math.floor(Date.now() / 1000));
     // Separate from `now` because one measures token expiry in seconds and the other measures cache
     // age in milliseconds. Injectable so a test can advance the cache clock without waiting.
     this.#nowMs = deps.nowMs ?? (() => Date.now());
+    this.#sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.#onError = deps.onError;
   }
 
   async verify(token: string): Promise<IdentityResult> {
@@ -162,7 +211,7 @@ export class PrivyIdentityProvider implements IdentityProvider {
   async #refresh(): Promise<void> {
     this.#inFlight ??= (async () => {
       try {
-        const jwks = await this.#fetchJwks();
+        const jwks = await this.#fetchWithRetry();
         const keys = new Map<string, KeyObject>();
         for (const jwk of jwks.keys ?? []) {
           // Only P-256 EC keys are usable for ES256. Anything else in the set is skipped rather
@@ -180,9 +229,14 @@ export class PrivyIdentityProvider implements IdentityProvider {
           this.#keys = keys;
           this.#fetchedAt = this.#nowMs();
         }
-      } catch {
+      } catch (cause) {
         // Leaves the previous cache in place. An unreachable provider degrades to "tokens signed
         // with keys we already know still work", which is strictly better than rejecting everyone.
+        //
+        // Reported rather than silently dropped: with an EMPTY cache this is not a degradation but
+        // a total sign-in outage, and saying so is the difference between a one-line log and
+        // reverse-engineering it from a 401.
+        this.#onError?.(cause instanceof Error ? cause : new Error(String(cause)), this.#keys.size);
       } finally {
         this.#inFlight = undefined;
       }
@@ -190,11 +244,34 @@ export class PrivyIdentityProvider implements IdentityProvider {
     await this.#inFlight;
   }
 
+  /** Fetches the JWKS, retrying once on a transient failure. See `REFRESH_ATTEMPTS`. */
+  async #fetchWithRetry(): Promise<{keys: Jwk[]}> {
+    let last: unknown;
+    for (let attempt = 1; attempt <= REFRESH_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.#fetchJwks();
+      } catch (cause) {
+        last = cause;
+        // A wrong app id does not become right on the second ask, and the last attempt has no
+        // pause to serve.
+        if (cause instanceof JwksClientError || attempt === REFRESH_ATTEMPTS) break;
+        await this.#sleep(RETRY_PAUSE_MS);
+      }
+    }
+    throw last;
+  }
+
   async #defaultFetch(): Promise<{keys: Jwk[]}> {
     const response = await fetch(this.#options.jwksUrl, {
+      // Per ATTEMPT, not per refresh — see DEFAULT_TIMEOUT_MS.
       signal: AbortSignal.timeout(this.#options.timeoutMs),
     });
-    if (!response.ok) throw new Error(`jwks endpoint returned ${response.status}`);
+    if (!response.ok) {
+      const message = `jwks endpoint returned ${response.status}`;
+      throw response.status >= 400 && response.status < 500
+        ? new JwksClientError(message)
+        : new Error(message);
+    }
     return (await response.json()) as {keys: Jwk[]};
   }
 }
