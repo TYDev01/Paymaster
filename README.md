@@ -48,7 +48,7 @@ tests have each been shown to fail when the code they guard is broken. See
 | [frontend/](frontend/) | The OPERATOR console (Next.js), on `:3003`: live metrics, chains, funding, alerts |
 | [deploy/](deploy/) | Multi-chain deploy + verification, the RPC router, an endpoint checker, Helm chart, monitoring config, k6 load test |
 | [docker-compose.yml](docker-compose.yml) | Stack: postgres, redis, rpc-router, bundler (Sepolia), backend |
-| [docs/](docs/) | Architecture, security, deployment, operations, runbooks, DR, monitoring, development |
+| [docs/](docs/) | Indexed at [docs/README.md](docs/README.md): integration, architecture, security, deployment, operations, runbooks, DR, monitoring, development |
 
 ### Ports, locally
 
@@ -262,8 +262,13 @@ Full detail, including what was deliberately *not* built and why, is in
 
 ## Documentation
 
+Start at **[docs/README.md](docs/README.md)** — it routes by audience, because all but one of these
+are written for the person RUNNING the platform rather than the person integrating with it.
+
 | | |
 | --- | --- |
+| [docs/README.md](docs/README.md) | Index, and the five things that surprise people |
+| [INTEGRATION.md](docs/INTEGRATION.md) | **For customers**: sign up, fund, mint a key, call the SDK |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Structure, and the reasoning behind it |
 | [SECURITY.md](docs/SECURITY.md) | Security guide and threat model |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Production deployment, in order, with a checklist |
