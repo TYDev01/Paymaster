@@ -42,12 +42,17 @@ function Header() {
           </span>
           <span className="text-sm font-semibold text-ash-100">Paymaster</span>
         </Link>
-        <Link
-          href="/dashboard"
-          className="rounded-md bg-ash-200 px-3.5 py-1.5 text-sm font-medium text-oil-950 transition-colors hover:bg-ash-100"
-        >
-          Sign in
-        </Link>
+        <div className="flex items-center gap-4">
+          <Link href="/docs" className="text-sm text-ash-400 transition-colors hover:text-ash-100">
+            Docs
+          </Link>
+          <Link
+            href="/dashboard"
+            className="rounded-md bg-ash-200 px-3.5 py-1.5 text-sm font-medium text-oil-950 transition-colors hover:bg-ash-100"
+          >
+            Sign in
+          </Link>
+        </div>
       </div>
     </header>
   );

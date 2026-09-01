@@ -187,3 +187,114 @@
   --color-serious: var(--status-serious);
   --color-critical: var(--status-critical);
 }
+/* ------------------------------------------------------------------------------------------------
+ * Documentation prose.
+ *
+ * Scoped to `.docs-prose` rather than set on the element types globally: the dashboard builds its
+ * own controls out of the same tags, and a global `h2` or `pre` rule would reach into every panel
+ * on every page. Nothing here escapes the docs route.
+ *
+ * The accent is a muted phosphor green rather than a blue — the oil ground already leans green, so
+ * an analogous accent sits with it instead of fighting it.
+ * ---------------------------------------------------------------------------------------------- */
+:root {
+  --phosphor: #8fbcae;
+  --phosphor-dim: #5f8378;
+  /* Strings in code samples: a desaturated sage, kept in the same family so a highlighted block
+     never reads as a different palette pasted in. */
+  --syntax-str: #b9c9a8;
+}
+
+.docs-prose {
+  color: var(--ash-400);
+  font-size: 0.9375rem;
+  line-height: 1.68;
+}
+
+.docs-prose > section + section { margin-top: 3.5rem; }
+
+.docs-prose h2 {
+  color: var(--ash-100);
+  font-size: 1.3rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  text-wrap: balance;
+  margin: 0 0 1rem;
+  padding-top: 1.75rem;
+  border-top: 1px solid var(--ash-800);
+  scroll-margin-top: 5rem;
+}
+.docs-prose > section:first-child h2 { border-top: none; padding-top: 0; }
+
+.docs-prose h3 {
+  color: var(--ash-100);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+  margin: 2rem 0 0.6rem;
+  scroll-margin-top: 5rem;
+}
+
+.docs-prose p { margin: 0 0 1rem; max-width: 72ch; }
+.docs-prose ul, .docs-prose ol { max-width: 72ch; padding-left: 1.15rem; margin: 0 0 1rem; }
+.docs-prose li { margin-bottom: 0.35rem; }
+.docs-prose li::marker { color: var(--ash-600); }
+.docs-prose strong { color: var(--ash-100); font-weight: 600; }
+.docs-prose em { color: var(--ash-200); font-style: italic; }
+.docs-prose a { color: var(--phosphor); text-decoration: none; }
+.docs-prose a:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+.docs-prose code {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.855em;
+  background: var(--oil-800);
+  border: 1px solid var(--ash-800);
+  border-radius: 3px;
+  padding: 0.08em 0.34em;
+  color: var(--ash-200);
+  word-break: break-word;
+}
+
+.docs-prose pre {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  background: var(--oil-900);
+  border: 1px solid var(--ash-800);
+  border-radius: 6px;
+  padding: 0.95rem 1.1rem;
+  /* Its own scroller, so a long command never makes the PAGE scroll sideways. */
+  overflow-x: auto;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  margin: 0 0 1.25rem;
+  max-width: 72ch;
+  color: var(--ash-200);
+}
+.docs-prose pre code { background: none; border: none; padding: 0; font-size: inherit; color: inherit; word-break: normal; }
+
+.docs-prose .c-dim { color: var(--ash-600); }
+.docs-prose .c-key { color: var(--phosphor); }
+.docs-prose .c-str { color: var(--syntax-str); }
+.docs-prose .c-hl { color: var(--phosphor); }
+
+.docs-prose table { border-collapse: collapse; width: 100%; font-size: 0.855rem; }
+.docs-prose th, .docs-prose td {
+  text-align: left;
+  padding: 0.6rem 0.85rem;
+  border-bottom: 1px solid var(--ash-800);
+  vertical-align: top;
+}
+.docs-prose tr:last-child td { border-bottom: none; }
+.docs-prose th {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.66rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ash-600);
+  font-weight: 400;
+  background: var(--oil-900);
+  white-space: nowrap;
+}
+.docs-prose td:first-child { color: var(--ash-100); white-space: nowrap; }
+.docs-prose td strong, .docs-prose td code { color: var(--ash-100); }
