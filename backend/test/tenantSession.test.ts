@@ -50,10 +50,24 @@ describe("tenant sessions", () => {
     await pg.pool.query("DELETE FROM tenants WHERE id <> 'default'");
   });
 
-  function service(subject: string | undefined, allowSelfSignup = false, newTenantId?: () => string) {
+  /** Records which tenants were provisioned, so the test can assert the port is actually used. */
+  let provisioned: string[] = [];
+  beforeEach(() => {
+    provisioned = [];
+  });
+
+  function service(
+    subject: string | undefined,
+    allowSelfSignup = false,
+    newTenantId?: () => string,
+    provisionPolicy: ((tenant: string) => Promise<void>) | undefined = async (tenant) => {
+      provisioned.push(tenant);
+    },
+  ) {
     return new TenantSessionService(stubProvider(subject), tenants, jwt, {
       allowSelfSignup,
       ...(newTenantId === undefined ? {} : {newTenantId}),
+      ...(provisionPolicy === undefined ? {} : {provisionPolicy}),
     });
   }
 
@@ -152,6 +166,34 @@ describe("tenant sessions", () => {
       if (!result.ok) return;
       expect(result.membership.tenant.id).not.toBe("default");
       expect(result.membership.tenant.id).toMatch(/^t_[0-9a-z]+$/);
+    });
+
+    it("gives the new tenant a starter policy", async () => {
+      // Without this the account is born unusable. SponsorService resolves the policy WITHIN the
+      // caller's tenant, so a tenant with none can fund a balance and mint a key and still fail
+      // every sponsorship — and the bootstrap seeder does not help, because it only ever fills an
+      // empty policy table, which the first tenant already did.
+      const result = await service(ALICE, true, () => "t_generated").signUp("provider-token", "Acme");
+
+      expect(result.ok).toBe(true);
+      expect(provisioned).toEqual(["t_generated"]);
+    });
+
+    it("refuses to hand back a session when the starter policy could not be written", async () => {
+      // Loud beats subtly broken. Swallowing this would return a working session for an account
+      // that can never sponsor — the very failure the provisioning exists to prevent, now with a
+      // green light in front of it.
+      const failing = service(ALICE, true, () => "t_nopolicy", async () => {
+        throw new Error("policy store unavailable");
+      });
+
+      await expect(failing.signUp("provider-token", "Acme")).rejects.toThrow("policy store unavailable");
+    });
+
+    it("still signs up when the deployment provisions no policy at all", async () => {
+      // The port is optional: a deployment without a database has no policy repository to write to.
+      const result = await service(ALICE, true, () => "t_nodb", undefined).signUp("provider-token", "Acme");
+      expect(result.ok).toBe(true);
     });
 
     it("leaves nothing behind when the tenant cannot be created", async () => {

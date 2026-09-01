@@ -41,7 +41,7 @@ interface CreatedKey extends ApiKey {
  * message. `sponsor:create` is the single exception the backend delegates, and that is the product.
  */
 const ROLES = [
-  {value: "sponsor", label: "Sponsor", detail: "For your dApp. Spends the balance within policy, and nothing else."},
+  {value: "sponsor", label: "Sponsor", detail: "For your server. Spends the balance within policy, and nothing else."},
   {value: "viewer", label: "Viewer", detail: "Read-only: keys, policies and usage. Cannot spend or change anything."},
 ] as const;
 
@@ -101,6 +101,12 @@ function SecretPanel({created, onDismiss}: {created: CreatedKey; onDismiss: () =
           {created.warning ?? "The secret is shown once and is not recoverable."} We store only its
           hash, so if it is lost the only fix is to mint a replacement and revoke this one.
         </span>
+      </p>
+
+      <p className="mt-2 pl-6 text-[11px] leading-relaxed text-ash-500">
+        Keep it on a server you control. A key is a bearer secret with no origin binding, so one
+        shipped to a browser can be read out of the page by anyone who loads it and used to spend
+        your balance until it is empty. Have your own backend hold it and decide who gets sponsored.
       </p>
 
       <div className="mt-3 flex items-center gap-2 rounded-md border border-ash-800 bg-oil-950 px-3 py-2">

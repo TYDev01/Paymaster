@@ -374,7 +374,25 @@ export async function buildDependencies(
           ),
           new TenantRepository(pool),
           jwt,
-          {allowSelfSignup: env.TENANT_SELF_SIGNUP},
+          {
+            allowSelfSignup: env.TENANT_SELF_SIGNUP,
+            // Every self-signed-up tenant gets its own copy of the starter policy, under the id
+            // SponsorService looks for. The rules are the same ones `BOOTSTRAP_DEFAULT_POLICY`
+            // seeds, but scoped to THIS tenant — policies are resolved per tenant, so a shared one
+            // would be invisible to it.
+            //
+            // Enabling self-service signup IS the operator's decision to let strangers create
+            // working accounts, so it carries the policy decision with it. The bootstrap seeder's
+            // "only into an empty table" caution does not apply: this writes a policy for a tenant
+            // that was created a moment ago and has none, so it can never overwrite anyone's
+            // edited rules or resurrect one they deleted.
+            provisionPolicy:
+              policyRepository === undefined
+                ? undefined
+                : async (tenant) => {
+                    await policyRepository.upsert(forTenant(tenant), defaultPolicyDefinition(env));
+                  },
+          },
         );
 
   return {
