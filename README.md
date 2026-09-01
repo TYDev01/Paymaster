@@ -5,7 +5,7 @@ platform: a verifying paymaster you own end to end, a sponsorship backend that d
 and a self-hosted bundler. No dependency on any hosted paymaster or bundler service.
 
 ```
-Wallet ──▶ SDK ──▶ Bundler (rundler) ──▶ EntryPoint ──▶ EVM chain
+Wallet ──▶ SDK ──▶ Bundler (rundler) ──▶ RPC router ──▶ EntryPoint ──▶ EVM chain
                 └──▶ Paymaster API ──▶ (policy + signature) ──▶ paymasterAndData
 ```
 
@@ -46,8 +46,8 @@ tests have each been shown to fail when the code they guard is broken. See
 | [sdk/](sdk/) | Framework-agnostic TypeScript SDK + runnable example |
 | [web/](web/) | The public site and the CUSTOMER dashboard (Next.js), on `:3000`. `/` explains the product; `/dashboard` is the signed-in account |
 | [frontend/](frontend/) | The OPERATOR console (Next.js), on `:3003`: live metrics, chains, funding, alerts |
-| [deploy/](deploy/) | Devnet setup, multi-chain deploy + verification, Helm chart, monitoring config, k6 load test |
-| [docker-compose.yml](docker-compose.yml) | Stack: postgres, redis, bundler (Sepolia), backend |
+| [deploy/](deploy/) | Multi-chain deploy + verification, the RPC router, an endpoint checker, Helm chart, monitoring config, k6 load test |
+| [docker-compose.yml](docker-compose.yml) | Stack: postgres, redis, rpc-router, bundler (Sepolia), backend |
 | [docs/](docs/) | Architecture, security, deployment, operations, runbooks, DR, monitoring, development |
 
 ### Ports, locally
@@ -62,6 +62,39 @@ rather than left to collide:
 | 3002 | Grafana |
 | 3003 | `frontend/` — the operator console |
 | 3100 | Backend API on the HOST. Inside its container it still listens on 3000, so nothing in Kubernetes changed |
+
+### The RPC router, and why the bundler needs one
+
+Rundler validates in safe mode, which enforces the ERC-7562 storage rules — the rules that make the
+paymaster's stake load-bearing. That requires `debug_traceCall` **with a custom JavaScript tracer**,
+and that one requirement narrows the field sharply:
+
+| Provider | `debug_traceCall` | Custom JS tracer |
+| --- | --- | --- |
+| QuickNode, Chainstack, self-hosted geth/reth | yes | **yes** |
+| Alchemy, Infura | yes, built-in tracers only | no — `-32600 invalid tracer value` |
+| Free public endpoints | no — `-32601` | no |
+
+The providers that qualify tend to meter hardest. QuickNode's free tier allows 15 requests/second,
+and rundler issues far more than that — measured at **369 ordinary reads per sponsored operation
+against 3 trace calls**. The endpoint that can validate gets exhausted by traffic that has nothing
+to do with validating.
+
+[deploy/rpc-router/](deploy/rpc-router/) splits the traffic by method: `debug_*` and `trace_*` go to
+the tracing provider, everything else to a second endpoint that never needs debug support. Both can
+be free tiers. Configure with `RPC_URL` (tracing) and `ALCHEMY_RPC_URL` (everything else) in
+`contracts/.env`.
+
+Before committing to a provider, check it:
+
+```bash
+./deploy/check-rpc.sh https://your-endpoint
+```
+
+Two more free-tier settings live in [docker-compose.yml](docker-compose.yml) and are documented
+there: `USER_OPERATION_EVENT_BLOCK_DISTANCE` (rundler's default searches block 0→latest, which
+every provider rejects) and `RUST_LOG` (rundler logs nothing by default, which makes every
+submission failure opaque).
 
 `web/` and `frontend/` are separate deployments on purpose. The operator console's server holds
 `PAYMASTER_ADMIN_KEY`, which reads and writes every tenant; the customer app authenticates as the

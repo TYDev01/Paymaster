@@ -161,8 +161,14 @@ Spend is counted in **gwei**, not wei — Redis `INCRBY` is a signed 64-bit inte
 
 ### Development
 
-`docker-compose.yml` brings up postgres, redis, the bundler and the backend, all pointed at
-**Ethereum Sepolia**. There is no local chain in the stack: the on-chain state is a paymaster
+`docker-compose.yml` brings up postgres, redis, the RPC router, the bundler and the backend, all
+pointed at **Ethereum Sepolia**.
+
+The router is not incidental plumbing. Rundler's safe-mode validation needs `debug_traceCall` with
+a custom JS tracer, which only a few providers serve and which they meter tightly; but only 3 calls
+per operation actually need it, against 369 ordinary reads. Routing by method keeps the scarce
+endpoint for the calls that require it and sends the rest anywhere. See the README for the provider
+matrix. There is no local chain in the stack: the on-chain state is a paymaster
 deployed once with `contracts/script/DeployPaymaster.s.sol`, and `./start.sh` reads it back —
 verifying code, deposit and stake — to generate the `CHAINS` everything else shares.
 

@@ -49,17 +49,56 @@ services:
 
   # A local chain for development. In a real deployment this is replaced by RPC endpoints in the
   # CHAINS config; nothing else in the stack changes.
+  # Splits the bundler's RPC traffic by method so a free tier can carry it. Only debug_* needs the
+  # tracing provider; everything else is an ordinary read. See deploy/rpc-router/router.mjs for why
+  # this exists rather than pointing the bundler straight at one endpoint.
+  rpc-router:
+    image: node:22-alpine
+    command: ["node", "/app/router.mjs"]
+    environment:
+      # The endpoint that can run a custom JS tracer. Scarce and rate-limited; used ONLY for
+      # debug_*/trace_*, which is what makes a 15/second cap survivable.
+      TRACE_RPC_URL: ${SEPOLIA_RPC_URL:?set SEPOLIA_RPC_URL in .env}
+      # Everything else. Any endpoint will do — it never needs debug support. Defaults to a public
+      # one so the stack works without a second provider account.
+      DEFAULT_RPC_URL: ${DEFAULT_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}
+      TRACE_RPS: "${TRACE_RPS:-8}"
+      PORT: "8546"
+    volumes:
+      - ./deploy/rpc-router:/app:ro
+    # Docker's embedded resolver returned intermittent EAI_AGAIN under rundler's request burst,
+    # which the router surfaced as "fetch failed" and rundler as a dead user operation. Naming
+    # resolvers explicitly removes that failure mode.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8546').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   bundler:
     image: alchemyplatform/rundler:v0.11.0
+    depends_on:
+      rpc-router:
+        condition: service_healthy
     environment:
       # A built-in rundler chain spec, which is why there is no chain.toml any more: the old one
       # existed ONLY because rundler ships no spec for chain id 31337. Its own comment said to
       # delete it and set NETWORK for a real chain, and that is what this is.
+      # rundler logs NOTHING by default here — an empty `docker compose logs bundler` is not a quiet
+      # bundler, it is an unset filter, and it makes every submission failure opaque. `info` is the
+      # useful floor; RUNDLER_LOG_LEVEL=debug when you need the RPC calls it is actually making.
+      RUST_LOG: "${RUNDLER_LOG_LEVEL:-info}"
       NETWORK: ethereum_sepolia
       # A real Sepolia endpoint. There is no anvil to fall back to, so an unset or rate-limited
       # value here is a bundler that starts and then serves nothing — prefer a provider endpoint
       # to a public one, because rundler polls this hard.
-      NODE_HTTP: ${SEPOLIA_RPC_URL:?set SEPOLIA_RPC_URL in .env}
+      # The router, not the provider directly. It fans debug_* to the tracing endpoint and the
+      # ~1000 ordinary reads per operation to a second one, so the tracing provider's per-second
+      # cap is spent only on calls that genuinely require it.
+      NODE_HTTP: http://rpc-router:8546
       ENABLED_ENTRY_POINTS: v0.7
       RPC_PORT: "3001"
       RPC_HOST: 0.0.0.0
@@ -70,6 +109,26 @@ services:
       # chain, and the error names the bundler rather than the stake. Must be <= the on-chain
       # stake; see STAKE_WEI in contracts/.env.
       MIN_STAKE_VALUE: "${MIN_STAKE_VALUE:-21000000000000000}"
+      # eth_getUserOperationByHash searches for the op's event with eth_getLogs, and by DEFAULT it
+      # searches from block 0 to latest. Every provider caps that range, so the default is a
+      # guaranteed failure on anything but your own node: QuickNode's free tier caps it at 5 blocks
+      # and answers HTTP 413 / -32615, which rundler surfaces as "internal error: rpc provider
+      # error" — a message that names neither eth_getLogs nor the plan limit that caused it.
+      #
+      # 4, not 5, because the bound is a range and off-by-one here costs another debugging round.
+      # The cost of a small window: an operation that takes longer than this many blocks to land
+      # is no longer findable by hash, though it still executes. Raise it as far as your plan
+      # allows — a paid tier is usually 10k+ blocks.
+      USER_OPERATION_EVENT_BLOCK_DISTANCE: "${UO_EVENT_BLOCK_DISTANCE:-4}"
+      # Retry on 429 instead of failing the request. Rundler bursts well past a free tier's
+      # per-second cap while validating, and without this a single throttled call inside
+      # eth_getUserOperationByHash surfaces as "internal error: rpc provider error" — which reads
+      # like a bug in the bundler rather than a quota.
+      PROVIDER_RATE_LIMIT_RETRY_ENABLED: "${PROVIDER_RATE_LIMIT_RETRY:-true}"
+      # Poll for new blocks every 2s rather than the default sub-second. Sepolia produces a block
+      # every ~12s, so this loses nothing real and removes a constant background drip of requests
+      # that eats the same per-second budget the validation burst needs.
+      POOL_CHAIN_POLL_INTERVAL_MILLIS: "${POOL_CHAIN_POLL_INTERVAL_MILLIS:-2000}"
       # The EOA that submits bundles, and PAYS FOR THEM in real Sepolia ETH. There is deliberately
       # no default: the old one was anvil's well-known key, which holds nothing on a public chain,
       # so a missing value used to produce a bundler that ran and silently landed no bundle. In

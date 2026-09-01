@@ -51,6 +51,24 @@ npm run dev --workspace @paymaster/backend
 There is no local devnet any more. A paymaster must be deployed to Sepolia first — see the README
 quickstart — because `start.sh` will not spend ETH on your behalf.
 
+### A quota gotcha while iterating
+
+Sponsorship reserves `maxCost` against the wallet's quota at signing time. The spend reconciler
+corrects that reservation from the receipt once the operation LANDS — so an operation that is
+signed and then never submitted leaves its reservation in place permanently.
+
+While debugging a bundler or an RPC that is not yet working, that adds up fast: fourteen failed
+attempts at ~0.007 ETH each exhausted a 0.1 ETH `wallet-daily-spend` quota without a single
+successful sponsorship, and the wallet then returned 429 for the rest of the day. The counters are
+in Redis and can be cleared during development:
+
+```bash
+docker compose exec redis redis-cli --scan --pattern 'quota:*<wallet>*'
+docker compose exec redis redis-cli DEL '<key>'
+```
+
+Do not do this in production — the reservation is what stops a wallet spending twice.
+
 ---
 
 ## Layout

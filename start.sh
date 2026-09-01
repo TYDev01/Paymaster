@@ -277,6 +277,11 @@ PAYMASTER_KIND="$(read_contracts_env PAYMASTER_KIND)"
 PAYMASTER_SIGNER="$(read_contracts_env PAYMASTER_SIGNER)"
 STAKE_WEI="$(read_contracts_env STAKE_WEI)"
 SEPOLIA_RPC_URL="${SEPOLIA_RPC_URL:-$(read_contracts_env RPC_URL)}"
+# The bundler's OTHER lane. Only debug_* needs the tracing provider; the ~1000 ordinary reads per
+# operation go here instead, which is what keeps a rate-limited tracing endpoint inside its cap.
+# Falls back to a public endpoint so the stack still works with only one provider configured.
+DEFAULT_RPC_URL="${DEFAULT_RPC_URL:-$(read_contracts_env ALCHEMY_RPC_URL)}"
+DEFAULT_RPC_URL="${DEFAULT_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}"
 
 # The address is preferably not typed at all: the broadcast receipt is what actually happened on
 # chain, so reading it there cannot disagree with the deployment the way a transcribed address can.
@@ -293,7 +298,7 @@ fi
 
 PAYMASTER_KIND="${PAYMASTER_KIND:-verifying}"
 STAKE_WEI="${STAKE_WEI:-21000000000000000}"
-export SEPOLIA_RPC_URL PAYMASTER_ADDRESS PAYMASTER_KIND STAKE_WEI
+export SEPOLIA_RPC_URL DEFAULT_RPC_URL PAYMASTER_ADDRESS PAYMASTER_KIND STAKE_WEI
 
 if [ "${SKIP_CHECKS}" -eq 1 ]; then
   log "skipping the Sepolia preflight (--skip-checks)"
@@ -309,15 +314,26 @@ else
   # endpoints do not serve it. Checked here because the failure otherwise arrives at the first
   # sponsorship, as a -32601 from the bundler that names a method nobody configured: the paymaster
   # signs happily, and only submission fails.
-  trace_probe="$(curl -s --max-time 10 -X POST "${SEPOLIA_RPC_URL}" -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":1,"method":"debug_traceCall","params":[{"to":"0x0000000071727De22E5E9d8BAf0edAc6f37da032"},"latest",{"tracer":"callTracer"}]}' 2>/dev/null || true)"
+  # A CUSTOM JS TRACER, which is the thing that actually matters and the reason this probe is not
+  # simply `debug_traceCall` with a named tracer. Rundler's safe-mode validation sends a JavaScript
+  # tracer; several providers serve `debug_traceCall` perfectly well for their BUILT-IN tracers
+  # (callTracer, prestateTracer) and reject custom JS with -32600 "invalid tracer value".
+  # Alchemy is one of them, measured. Probing with a named tracer therefore passes and tells you
+  # nothing — the failure still arrives later, at the first submission.
+  #
+  # `data` is not optional either: without it some providers answer with an empty body, which is
+  # neither a result nor an error. 30s because a cold trace has been measured at 9s.
+  trace_probe="$(curl -s --max-time 30 -X POST "${SEPOLIA_RPC_URL}" -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"debug_traceCall","params":[{"to":"0x0000000071727De22E5E9d8BAf0edAc6f37da032","data":"0x"},"latest",{"tracer":"{data:[],fault:function(){},step:function(){},result:function(){return this.data}}"}]}' 2>/dev/null || true)"
   case "${trace_probe}" in
-    *'"error"'*)
-      warn "this RPC does not serve debug_traceCall — rundler's safe mode needs it"
-      warn "  sponsorships will SIGN but never submit (-32601 from the bundler)"
-      warn "  use a provider endpoint with the debug API, or set UNSAFE=true to skip trace validation"
+    *'"result"'*) step "debug_traceCall with a custom JS tracer: available" ;;
+    *)
+      warn "this RPC will not run a CUSTOM JS TRACER, which rundler's safe mode requires"
+      warn "  sponsorships will SIGN but never submit — the bundler fails, not the paymaster"
+      warn "  a provider serving only built-in tracers (callTracer/prestateTracer) is NOT enough"
+      warn "  use QuickNode/Chainstack/self-hosted geth-reth, or set UNSAFE=true to skip validation"
+      [ -n "${trace_probe}" ] && warn "  RPC said: $(printf '%s' "${trace_probe}" | head -c 160)"
       ;;
-    *) step "debug_traceCall available" ;;
   esac
 
   # A paymaster address with no code is the single most confusing failure mode here: the backend
@@ -439,6 +455,7 @@ if bundler_key:
     values["BUNDLER_SIGNER_KEY"] = bundler_key
 
 values["SEPOLIA_RPC_URL"] = rpc_url
+values["DEFAULT_RPC_URL"] = os.environ.get("DEFAULT_RPC_URL", "")
 values["MIN_STAKE_VALUE"] = str(stake_wei)
 
 existing = dst.read_text() if dst.exists() else ""
