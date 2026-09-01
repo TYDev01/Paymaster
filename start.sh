@@ -304,6 +304,22 @@ else
   [ "${chain_id}" = "11155111" ] \
     || fail "RPC ${SEPOLIA_RPC_URL} reports chain id '${chain_id:-unreachable}', expected 11155111"
 
+  # Rundler runs in SAFE mode, which enforces the ERC-7562 storage rules — the rules that make the
+  # stake load-bearing in the first place — and that needs `debug_traceCall`. Most free public
+  # endpoints do not serve it. Checked here because the failure otherwise arrives at the first
+  # sponsorship, as a -32601 from the bundler that names a method nobody configured: the paymaster
+  # signs happily, and only submission fails.
+  trace_probe="$(curl -s --max-time 10 -X POST "${SEPOLIA_RPC_URL}" -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"debug_traceCall","params":[{"to":"0x0000000071727De22E5E9d8BAf0edAc6f37da032"},"latest",{"tracer":"callTracer"}]}' 2>/dev/null || true)"
+  case "${trace_probe}" in
+    *'"error"'*)
+      warn "this RPC does not serve debug_traceCall — rundler's safe mode needs it"
+      warn "  sponsorships will SIGN but never submit (-32601 from the bundler)"
+      warn "  use a provider endpoint with the debug API, or set UNSAFE=true to skip trace validation"
+      ;;
+    *) step "debug_traceCall available" ;;
+  esac
+
   # A paymaster address with no code is the single most confusing failure mode here: the backend
   # validates its CHAINS at boot and would refuse to start, naming the chain and not the typo.
   code="$(cast code "${PAYMASTER_ADDRESS}" --rpc-url "${SEPOLIA_RPC_URL}" 2>/dev/null || echo 0x)"
