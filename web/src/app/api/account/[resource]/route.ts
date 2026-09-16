@@ -17,8 +17,17 @@ import {api, sessionToken} from "@/lib/session";
  */
 const ALLOWED = {
   keys: {path: "/admin/keys", methods: ["GET", "POST"], key: "keys"},
-  policies: {path: "/admin/policies", methods: ["GET"], key: "policies"},
+  // POST upserts one of the tenant's own policies. Plan ceilings are appended server-side on load, so
+  // nothing a customer writes here can lift them.
+  policies: {path: "/admin/policies", methods: ["GET", "POST"], key: "policies"},
+  billing: {path: "/admin/billing", methods: ["GET"], key: undefined},
+  // Only a transaction hash and a plan go up; the backend reads amount, recipient and account from
+  // the chain, so this cannot be used to grant time that was not paid for.
+  claim: {path: "/admin/subscription/claim", methods: ["POST"], key: undefined},
   funding: {path: "/admin/funding", methods: ["GET"], key: "funding"},
+  // Returns a signed attestation for the wallet the customer names; the backend refuses it for a
+  // balance that already has a controller, and the wallet still has to submit it on chain.
+  controller: {path: "/admin/funding/controller", methods: ["POST"], key: undefined},
   subscription: {path: "/admin/subscription", methods: ["GET"], key: undefined},
   sponsorships: {path: "/admin/sponsorships", methods: ["GET"], key: "sponsorships"},
 } as const satisfies Record<string, {path: string; methods: readonly string[]; key: string | undefined}>;
@@ -70,12 +79,19 @@ async function proxy(request: Request, resource: string, method: "GET" | "POST")
 
   // Lists arrive in a named envelope so a response can carry a caveat alongside its rows — which
   // `/admin/sponsorships` does. Unwrapping keeps the UI working with arrays while preserving it.
-  if (route.key === undefined) return NextResponse.json({data: result.data});
-  const rows = result.data[route.key];
-  return NextResponse.json({
-    data: Array.isArray(rows) ? rows : [],
-    ...(typeof result.data["note"] === "string" ? {note: result.data["note"]} : {}),
-  });
+  //
+  // GET only, and that qualifier is load-bearing. `POST /admin/keys` answers with a single created
+  // key rather than a list, and it is the one response in the system that ever carries a secret.
+  // Looking for a `keys` array in it finds nothing, and the `[]` fallback below would then discard
+  // the secret the customer has exactly one chance to read.
+  if (method === "GET" && route.key !== undefined) {
+    const rows = result.data[route.key];
+    return NextResponse.json({
+      data: Array.isArray(rows) ? rows : [],
+      ...(typeof result.data["note"] === "string" ? {note: result.data["note"]} : {}),
+    });
+  }
+  return NextResponse.json({data: result.data});
 }
 
 export async function GET(request: Request, context: {params: Promise<{resource: string}>}) {

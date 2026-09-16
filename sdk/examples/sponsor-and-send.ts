@@ -2,13 +2,20 @@
  * End-to-end example: sponsor a UserOperation and send it, with the account paying no gas.
  *
  * This is the flow td.md and td2.md describe — the SDK drives both the paymaster and the bundler.
- * It is deliberately runnable against the local docker-compose stack rather than pseudocode:
+ * It is deliberately runnable against the real stack rather than pseudocode:
  *
- *   1. docker compose up -d          (postgres, redis, anvil, bundler, backend)
- *   2. deploy an EntryPoint + a staked VerifyingPaymaster + a SimpleAccount to the anvil chain,
- *      and configure CHAINS to point at them   (see deploy/ — a helper script lands there next)
+ *   1. ./start.sh                    (postgres, redis, bundler, backend — all against Sepolia)
+ *   2. deploy a staked paymaster to Sepolia, if you have not:
+ *        forge script script/DeployPaymaster.s.sol --rpc-url $RPC_URL --broadcast
+ *      start.sh generates CHAINS from the broadcast receipt, so nothing is transcribed.
  *   3. mint an API key:  npm run key:generate  (in backend/)
- *   4. tsx sdk/examples/sponsor-and-send.ts
+ *   4. SMART_ACCOUNT=0x... ACCOUNT_OWNER_KEY=0x... API_KEY=... tsx sdk/examples/sponsor-and-send.ts
+ *
+ * THE SMART ACCOUNT IS YOURS TO PROVIDE. On the old anvil devnet a SimpleAccount was deployed for
+ * you by local-setup.sh; on Sepolia there is no such thing, so deploy one (any ERC-4337 v0.7
+ * account) and pass its address. It does NOT need to be funded — that is the entire point of the
+ * paymaster — but it MUST already be deployed, or validation fails with AA20 rather than
+ * anything that mentions the account.
  *
  * The account owner key here signs the UserOperation. It never leaves this process, and the SDK
  * never sees it — the SDK is handed a signing callback, not a key.
@@ -20,14 +27,14 @@ import {SponsoredBundlerClient} from "../src/index.js";
 
 async function main(): Promise<void> {
   const config = {
-    chainId: Number(process.env["CHAIN_ID"] ?? 31337),
+    chainId: Number(process.env["CHAIN_ID"] ?? 11155111),
     entryPoint: (process.env["ENTRY_POINT"] ?? "0x0000000071727De22E5E9d8BAf0edAc6f37da032") as Address,
     paymasterEndpoint: process.env["PAYMASTER_URL"] ?? "http://localhost:3100",
     bundlerEndpoint: process.env["BUNDLER_URL"] ?? "http://localhost:3001",
     apiKey: required("API_KEY"),
     accountOwnerKey: required("ACCOUNT_OWNER_KEY") as Hex,
     smartAccount: required("SMART_ACCOUNT") as Address,
-    rpcUrl: process.env["RPC_URL"] ?? "http://localhost:8545",
+    rpcUrl: process.env["RPC_URL"] ?? "https://ethereum-sepolia-rpc.publicnode.com",
   };
 
   const owner = privateKeyToAccount(config.accountOwnerKey);

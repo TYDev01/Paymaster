@@ -63,6 +63,31 @@ export const recordPaymentSchema = z.object({
 
 export type RecordPaymentRequestDto = z.infer<typeof recordPaymentSchema>;
 
+/**
+ * A request for the attestation that lets a wallet claim control of this tenant's balance.
+ *
+ * Only the chain and the wallet. The tenant comes from the session, never the body — a tenant a
+ * caller could name is a balance a caller could redirect.
+ */
+export const controllerAssignmentSchema = z.object({
+  chainId: z.number().int().positive(),
+  controller: z.string().regex(/^0x[0-9a-fA-F]{40}$/, "controller must be a 20-byte address"),
+});
+
+export type ControllerAssignmentRequest = z.infer<typeof controllerAssignmentSchema>;
+
+/**
+ * A self-service payment claim. The customer supplies the hash and which plan they paid for;
+ * everything that decides whether the payment counts is read from the chain.
+ */
+export const claimPaymentSchema = z.object({
+  chainId: z.number().int().positive(),
+  txHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "txHash must be a 32-byte hex hash"),
+  planId: z.string().min(1).max(64),
+});
+
+export type ClaimPaymentRequest = z.infer<typeof claimPaymentSchema>;
+
 export const listSponsorshipsSchema = z.object({
   apiKeyId: z.string().max(128).optional(),
   chainId: z.coerce.number().int().positive().optional(),

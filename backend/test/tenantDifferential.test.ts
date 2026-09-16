@@ -9,6 +9,7 @@ import {onChainTenantKey, TENANT_LAYOUT} from "../src/signature/paymasterLayout.
 import {SignatureEngine} from "../src/signature/signatureEngine.js";
 import {LocalSponsorshipSigner} from "../src/signature/signer.js";
 import {sponsorshipDigest, sponsorshipDomain} from "../src/signature/typedData.js";
+import {controllerAssignmentDigest, signControllerAssignment} from "../src/signature/controllerAssignment.js";
 import {deploy, loadArtifact, startAnvil, type AnvilInstance} from "./support/anvil.js";
 
 /**
@@ -311,5 +312,67 @@ describe("signature engine <-> TenantPaymaster differential", () => {
         args: [onChainTenantKey(RIVAL)],
       }),
     ).toBe(0n);
+  });
+
+  it("controller assignment digest matches the contract", async () => {
+    // Self-service withdrawal rests on this: the backend signs it, the customer's wallet submits it,
+    // and a drift means every claim reverts with InvalidControllerAssignment.
+    const chainId = anvil.publicClient.chain!.id;
+    const cases = [
+      {tenant: onChainTenantKey(ACME), controller: signer.address, nonce: 0n, deadline: 1_800_000_000},
+      {tenant: onChainTenantKey(RIVAL), controller: owner, nonce: 2n ** 40n, deadline: 2 ** 48 - 1},
+    ];
+
+    for (const c of cases) {
+      const onChain = await anvil.publicClient.readContract({
+        address: paymaster,
+        abi: paymasterAbi,
+        functionName: "getControllerAssignmentHash",
+        args: [c.tenant, c.controller, c.nonce, c.deadline],
+      });
+      expect(controllerAssignmentDigest({chainId, paymaster, ...c})).toBe(onChain);
+    }
+  });
+
+  it("a customer's wallet claims control with the backend's attestation", async () => {
+    const tenant = onChainTenantKey(RIVAL);
+    const customer = anvil.walletClient.account!.address;
+    const nonce = (await anvil.publicClient.readContract({
+      address: paymaster,
+      abi: paymasterAbi,
+      functionName: "controllerNonce",
+      args: [tenant],
+    })) as bigint;
+    const block = await anvil.publicClient.getBlock();
+
+    const assignment = await signControllerAssignment(new LocalSponsorshipSigner(signerKey), {
+      chainId: anvil.publicClient.chain!.id,
+      paymaster,
+      tenant,
+      controller: customer,
+      nonce,
+      deadline: Number(block.timestamp) + 900,
+    });
+
+    // Submitted by the customer, exactly as the dashboard does. No owner transaction anywhere.
+    const hash = await anvil.walletClient.writeContract({
+      address: paymaster,
+      abi: paymasterAbi,
+      functionName: "claimController",
+      args: [tenant, customer, assignment.deadline, assignment.signature],
+      account: anvil.walletClient.account!,
+      chain: anvil.walletClient.chain,
+    });
+    const receipt = await anvil.publicClient.waitForTransactionReceipt({hash});
+    expect(receipt.status).toBe("success");
+
+    expect(
+      await anvil.publicClient.readContract({
+        address: paymaster,
+        abi: paymasterAbi,
+        functionName: "controllerOf",
+        args: [tenant],
+      }),
+    ).toBe(customer);
   });
 });

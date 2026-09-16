@@ -183,6 +183,42 @@ secrets:
 # Extra env vars appended verbatim (e.g. AWS_REGION for KMS). List of {name, value} or {name, valueFrom}.
 extraEnv: []
 
+# ------------------------------------------------------------------------------------------------
+# Bundler (rundler)
+# ------------------------------------------------------------------------------------------------
+# Off by default, and needed by almost every real deployment. The paymaster is staked at a
+# platform-sized amount (0.02 ETH per chain by default), which is BELOW the 1 ETH floor a stock
+# rundler or a hosted bundler enforces — they reject every operation with -32502. So the platform
+# runs its own bundler with a matching floor, exposes it (through your own Ingress), and customers
+# point the SDK's `bundler.endpoint` at it.
+#
+# One release per chain: rundler serves one network per process. Scale by adding signer keys, not
+# replicas — two instances submitting from one EOA race each other for nonces.
+bundler:
+  enabled: false
+  image:
+    repository: alchemyplatform/rundler
+    tag: v0.11.0
+    pullPolicy: IfNotPresent
+  # A rundler built-in chain spec: ethereum_sepolia, base, base_sepolia, optimism, arbitrum, ...
+  network: ""
+  # Wei. Must be <= the on-chain stake of every paymaster this bundler serves. Matches the 0.02 ETH
+  # stake in deploy/chains.example.json; raise both together.
+  minStakeValue: "20000000000000000"
+  # How far back eth_getUserOperationByHash searches. Raise to whatever your RPC plan allows.
+  userOperationEventBlockDistance: "1000"
+  logLevel: info
+  # REQUIRED when enabled. Must contain NODE_HTTP (the RPC URL) and one of SIGNER_PRIVATE_KEYS or
+  # SIGNER_AWS_KMS_KEY_IDS (plus AWS_REGION). Both are credentials, so they never live in values.
+  existingSecret: ""
+  extraEnv: []
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
 # Liveness restarts a wedged process; readiness gates traffic. They are deliberately different
 # endpoints: an RPC outage must fail readiness (route traffic away) without failing liveness
 # (which would restart-loop every pod and turn a degradation into an outage).

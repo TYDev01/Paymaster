@@ -63,6 +63,15 @@ export interface QuotaRuleOptions {
    * enforced, and a quota that silently does not apply is worse than no quota at all.
    */
   readonly onMissingSubject?: "deny" | "skip";
+  /**
+   * Scopes the counter to one tenant. Without it, two tenants who both wrote a quota called `daily`
+   * shared one counter — so one customer's traffic spent another's quota, and a `global` quota could
+   * be exhausted on purpose by anyone who guessed its name.
+   *
+   * Empty (the default tenant) keeps the original key shape, so upgrading a single-tenant deployment
+   * does not silently hand every caller a fresh quota.
+   */
+  readonly namespace?: string;
 }
 
 /**
@@ -91,7 +100,11 @@ export class QuotaRule implements ReservingRule {
 
     this.#store = store;
     this.name = options.name;
-    this.#options = {...options, onMissingSubject: options.onMissingSubject ?? "deny"};
+    this.#options = {
+      ...options,
+      onMissingSubject: options.onMissingSubject ?? "deny",
+      namespace: options.namespace ?? "",
+    };
     // Limits round DOWN and charges round UP: both errors land on the side of spending less than
     // configured, never more.
     this.#countedLimit = options.unit === "wei" ? options.limit / WEI_PER_GWEI : options.limit;
@@ -174,7 +187,10 @@ export class QuotaRule implements ReservingRule {
    * an hourly wallet cap — do not share a counter.
    */
   #keyFor(fields: QuotaSubjectFields): string | undefined {
-    const prefix = `quota:${this.name}`;
+    // `/` separates namespace from name because a tenant id cannot contain one (TENANT_ID_PATTERN),
+    // so `a:b` + `c` and `a` + `b:c` can never produce the same key.
+    const namespace = this.#options.namespace;
+    const prefix = namespace === "" ? `quota:${this.name}` : `quota:${namespace}/${this.name}`;
     switch (this.#options.subject) {
       case "wallet":
         return `${prefix}:${fields.chainId}:${fields.sender.toLowerCase()}`;

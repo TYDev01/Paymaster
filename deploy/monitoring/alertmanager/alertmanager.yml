@@ -1,0 +1,70 @@
+# Alertmanager routing for the paymaster's Prometheus rules (deploy/monitoring/prometheus/alerts.yml).
+#
+# Two tiers, matching the `severity` label every rule carries:
+#
+#   critical — sponsorship is stopped or money is at risk. Pages, repeats hourly until resolved.
+#   warning  — degradation that needs a human today, not at 3am. Goes to chat.
+#
+# The backend ALSO pages directly (ALERT_WEBHOOK_URL) for what it can see itself: a drained deposit,
+# a tripped RPC circuit, a tenant balance moving without an event, an insolvent tenant paymaster.
+# Only the funding rules are duplicated here on purpose, as a backstop for the case where the
+# backend's own alert egress is broken — the inhibit rule below keeps that from double-paging when
+# both work.
+#
+# Credentials are read from FILES, never inlined, so this file is safe to commit and the same file
+# serves every environment. Mount the secrets at /etc/alertmanager/secrets/ (a Kubernetes Secret or
+# a Docker secret):
+#
+#   pagerduty_routing_key   PagerDuty Events API v2 integration key
+#   slack_webhook_url       Slack incoming-webhook URL (the URL is itself the credential)
+#
+# Validate with:  docker run --rm -v "$PWD/deploy/monitoring/alertmanager:/etc/alertmanager" \
+#                   --entrypoint amtool prom/alertmanager:v0.28.1 check-config /etc/alertmanager/alertmanager.yml
+
+global:
+  resolve_timeout: 5m
+
+route:
+  # Anything that matches no route below is dropped rather than paged. Every rule we ship has a
+  # severity, so this only catches a rule someone added without one — which should be visible in
+  # Prometheus, not a surprise page.
+  receiver: discard
+  group_by: [alertname, chain]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: [severity="critical"]
+      receiver: pager
+      group_wait: 10s
+      repeat_interval: 1h
+      # Also send criticals to chat, so the people not on call can see what paged.
+      continue: true
+    - matchers: [severity=~"critical|warning"]
+      receiver: chat
+
+inhibit_rules:
+  # While a chain has a critical alert firing, its warnings are noise about the same incident.
+  - source_matchers: [severity="critical"]
+    target_matchers: [severity="warning"]
+    equal: [chain]
+
+receivers:
+  - name: discard
+
+  - name: pager
+    pagerduty_configs:
+      - routing_key_file: /etc/alertmanager/secrets/pagerduty_routing_key
+        send_resolved: true
+        severity: critical
+        description: '{{ .CommonAnnotations.summary }}'
+        details:
+          runbook: '{{ .CommonAnnotations.runbook }}'
+          chain: '{{ .CommonLabels.chain }}'
+
+  - name: chat
+    slack_configs:
+      - api_url_file: /etc/alertmanager/secrets/slack_webhook_url
+        send_resolved: true
+        title: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ "\n" }}{{ end }}'

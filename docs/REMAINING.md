@@ -9,6 +9,26 @@ Legend: 🔴 blocks production · 🟡 spec-required, not blocking · 🟢 harde
 
 ---
 
+## Completed: self-service money, plans, and ledger reconciliation
+
+- ✅ **A customer can take their own money out**, without the platform sending a transaction.
+  `TenantPaymaster.claimController` accepts an attestation signed by the platform and submitted by the
+  customer's wallet, for a balance that has no controller yet, with a one-day delay before it can
+  withdraw. That delay exists because the attestation is signed by the same ONLINE key that approves
+  sponsorships: it is the window in which a claim made with a stolen key is visible and cancellable.
+  Replacing an existing controller is that controller's own call, never the signer's.
+- ✅ **Payments credit themselves.** A customer pays the treasury with their tenant key as the
+  transfer's calldata and claims it by hash; everything that decides what was bought is read from the
+  chain.
+- ✅ **Plans mean something.** `PLANS` maps a plan to a price per chain, a daily operation and gas
+  ceiling, and chain access — enforced as rules appended to every one of that tenant's policies.
+- ✅ **Tenants edit their own policies**, bounded by those ceilings.
+- ✅ **Notices before a subscription lapses**, deduplicated across replicas in the database.
+- ✅ **The tenant ledger is reconciled against the chain** and the contract's solvency watched.
+- ✅ **Alertmanager routing**, a dashboard image, and an optional bundler in the Helm chart.
+- ✅ **A cross-tenant quota bug fixed**: counters were keyed by rule name alone, so two tenants using
+  the same quota name shared one counter. See item 7 below.
+
 ## Completed: deploy, Redis, testing and documentation pass
 
 - ✅ **Multi-chain deploy runner + contract verification** — and, in running it against a real
@@ -192,11 +212,18 @@ In dependency order — each item needs the ones above it.
    unreachable, because failing closed would turn an RPC blip into a sponsorship outage to protect
    money the contract already protects. The contract's reservation is what actually holds the line.
 
-   What is left:
-   - **a funding UI.** The data is served; nothing renders it or connects a wallet to `depositFor`.
-   - **`setController` is owner-only**, so self-service withdrawal needs an admin path.
-   - **reconciling** the `sponsorships` table against on-chain balances.
-   - **subscriptions**: ✅ built — see item 6.
+   What is left: nothing on this item.
+   - ✅ **a funding UI** — `/dashboard/funding` deposits from the customer's own wallet.
+   - ✅ **self-service withdrawal** — `claimController` takes a platform attestation and is submitted
+     by the CUSTOMER, so no operator transaction is involved. It works only for a balance with no
+     controller yet, and the claimed wallet waits `CONTROLLER_CLAIM_DELAY` (one day) before it can
+     withdraw, which is the window in which a claim made with a stolen signer key can be voided by
+     the owner. Replacing an existing controller is that controller's own call, never the signer's.
+   - ✅ **reconciling against on-chain balances** — `TenantLedgerReconciler` replays every
+     `TenantDeposited` / `TenantWithdrawn` / `TenantCharged` event and compares the result with the
+     balance in storage, and checks `sum(balances) <= deposit` on the DEPLOYED contract. It alerts;
+     it never corrects, because the chain is the source of truth.
+   - ✅ **subscriptions** — see item 6.
 
    The paragraph below is kept as written because it describes the shape the rest of this still has
    to grow. One line of it is now wrong and worth flagging rather than quietly editing: it concluded
@@ -237,16 +264,31 @@ In dependency order — each item needs the ones above it.
    from `paid_through` and the clock rather than stored, so no missed sweep can grant or withhold
    service that was not bought.
 
-   Still missing, and the reason this is not ✅:
-   - **payment detection.** Someone has to notice an incoming transfer and call the record
-     endpoint. Today that is a manual platform action.
-   - **a plan catalogue.** `plan` is free text; nothing maps a plan to a quota tier or chain access.
-   - **notice before lapsing.** Nothing warns a customer that their period is ending.
-7. **Tenant-scoped policy.** Today a policy is global and edited by the operator. A tenant needs to
-   edit its own policy, bounded by platform limits it cannot raise — nested limits, not a flat set.
-8. **The frontend for all of it.** Signup, org management, keys, funding, usage, invoices. The
-   current console is an OPERATOR view and read-only by design; this is a second, tenant-facing
-   surface with write paths and wallet connection.
+   ✅ **All three gaps are now closed.**
+   - ✅ **payment detection.** The customer pays the treasury with their tenant key as the transfer's
+     calldata and claims it by hash; `PaymentVerifier` reads amount, recipient, account and
+     confirmations off the chain and credits the period. The tenant key in the calldata is what stops
+     one customer claiming another's transfer, and the unique index on `(chain_id, tx_hash)` is what
+     makes a transaction buy one period however many times it is claimed. Recording a payment by hand
+     is still there for the platform, on `billing:write`.
+   - ✅ **a plan catalogue.** `PLANS` maps a plan to a price per chain, a quota tier and chain access.
+   - ✅ **notice before lapsing.** A sweep warns a week before the period ends and again in grace,
+     claimed in the database before delivery so replicas cannot duplicate one. The dashboard shows the
+     same state as a banner whether or not a webhook is configured.
+7. ✅ **Tenant-scoped policy — BUILT.** A tenant edits its own policies at `/dashboard/policies`; the
+   plan's ceilings are appended to every one of them at load time, so the two are ANDed and the lower
+   always binds. Nested limits, not a flat set: a tenant may tighten anything and can raise nothing.
+
+   Building it found a cross-tenant bug worth naming. Quota counters were keyed by rule NAME only, so
+   two tenants who both called a quota `daily` shared one counter — one customer's traffic spent
+   another's quota, and a `global` quota could be exhausted deliberately by anyone who guessed its
+   name. Counters are now namespaced by tenant; the default tenant keeps the old key shape so an
+   upgrading single-tenant deployment does not hand every caller a fresh quota. The `platform:` name
+   prefix is reserved for ceilings.
+8. ⚠️ **The frontend for all of it.** Signup, keys, funding, withdrawal, billing, payment and policy
+   editing are built. Still missing: **org management** (inviting people to a tenant, changing their
+   roles — `tenant_members` supports it and nothing renders it) and **usage**, beyond the raw
+   sponsorship list.
 
 ### What it can build on
 
@@ -352,9 +394,13 @@ asserting at least one sponsorship actually landed in each run: the first versio
 one of its 16,384 calls refused for insufficient balance and passed all three invariants while
 exercising none of the spending path.
 
-Still open: **the opt-in dedicated paymaster** for a tenant large enough to fund its own stake, and
-**`setController` is owner-only**, so a customer's ability to withdraw their own balance is granted
-by the platform per tenant rather than derived on chain from who funded it.
+Still open: **the opt-in dedicated paymaster** for a tenant large enough to fund its own stake.
+
+`setController` is no longer the only route to withdrawal: `claimController` lets a customer name
+their own wallet with a platform attestation they submit themselves. The platform still decides who
+may claim — the mapping from a tenant id to a person lives off chain and the contract cannot check it
+— but it no longer has to send a transaction, and it cannot redirect a balance that already has a
+controller.
 
 ---
 
@@ -492,9 +538,13 @@ Documented end to end in [docs/MONITORING.md](MONITORING.md), including a runboo
 - **Local stack** — `docker compose --profile monitoring up` brings up Prometheus, Grafana and an
   OTel collector. Configuration-only: the backend exports metrics and spans whether or not they run.
 
-Still open: **Alertmanager routing** is not configured (routing/silencing/escalation are deployment
-decisions, and the compose stack deliberately does not page), and the `PaymasterGasCommitmentSurge`
-and `PaymasterDenialSurge` thresholds ship as placeholders that must be tuned to real traffic.
+✅ **Alertmanager routing** now ships: `deploy/monitoring/alertmanager/alertmanager.yml` routes
+criticals to a pager and everything to chat, inhibits a chain's warnings while it has a critical
+firing, and reads both credentials from files so the same config serves every environment. It runs in
+the `monitoring` compose profile; in Kubernetes, point your existing Alertmanager at the same rules.
+
+Still open: the `PaymasterGasCommitmentSurge` and `PaymasterDenialSurge` thresholds ship as
+placeholders that must be tuned to real traffic.
 
 ### ✅ Remaining Redis uses — DONE (the two that were needed)
 td.md lists four Redis uses beyond quotas. Two were real gaps and are built; two would have been

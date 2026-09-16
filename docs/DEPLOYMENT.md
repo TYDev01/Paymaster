@@ -97,7 +97,10 @@ cast call <paymaster> "owner()(address)" --rpc-url $RPC_URL   # must be the mult
 | **Deposit** | Pays for sponsored gas | At zero, every operation fails AA31 |
 | **Stake** | Permits reading own storage during validation (ERC-7562) | Unstaked, conforming bundlers reject every operation (rundler: -32502) |
 
-The 1 ETH / 1 day defaults match rundler's minimums. **Confirm your bundler's requirements before
+The 0.02 ETH / 1 day defaults are testnet-sized and sit BELOW rundler's stock 1 ETH minimum,
+deliberately: on a testnet the stake comes out of a faucet. A bundler you run must then be started
+with `--min_stake_value 20000000000000000`; a stock or public one rejects the paymaster outright
+with -32502, before any operation reaches the chain. **Confirm your bundler's requirements before
 deploying** — they are the bundler's policy, not consensus, and other bundlers differ.
 
 The unstake delay is a real commitment: withdrawing stake requires unlocking and then waiting it
@@ -165,6 +168,60 @@ every pod and turn a degradation into an outage.
 Everything else has a documented default in [backend/.env.example](../backend/.env.example). Set
 `ADMIN_JWT_SECRET`, `REQUEST_SIGNING_SECRET` and `ALERT_WEBHOOK_URL` before you consider the
 deployment finished — each is optional to boot and important in production.
+
+### Selling plans, and taking payment without an operator in the loop
+
+Set `PLANS` to a JSON catalogue and `BILLING_TREASURY_ADDRESS` to the address customers pay, and the
+dashboard can sell and credit periods on its own. Both are needed: without the treasury the claim
+endpoint is disabled and payments go through `POST /admin/subscriptions/payments` by hand.
+
+```bash
+PLANS='[{"id":"growth","name":"Growth","periodSeconds":2592000,
+         "priceWei":{"11155111":"10000000000000000"},
+         "limits":{"operationsPerDay":"10000","weiPerDay":"200000000000000000"},
+         "chainIds":[11155111]}]'
+BILLING_TREASURY_ADDRESS=0x...   # an EOA, or a contract with a payable fallback
+DEFAULT_PLAN_ID=growth           # the ceilings a tenant with no subscription is held to
+SUBSCRIPTION_REQUIRED=false      # true refuses tenants with no subscription row at all
+```
+
+**The treasury must accept a transfer WITH calldata.** A payment carries the payer's tenant key as its
+data, which is what ties it to an account; a contract that reverts on unknown calldata will reject
+every payment. Verify with one small transfer before announcing it.
+
+**`SUBSCRIPTION_REQUIRED=true` takes every tenant with no subscription row offline.** Leave it false
+until your existing customers have rows.
+
+A plan's `limits` are enforced as rules appended to every one of that tenant's policies at load time,
+per account per day. A tenant can tighten them and cannot raise them. Removing a plan from `PLANS`
+does not lift the ceilings on tenants who were on it — they fall back to `DEFAULT_PLAN_ID`.
+
+Notices before a period ends are on by default (`SUBSCRIPTION_NOTICE_SECONDS`, seven days) and reach
+the log; set `SUBSCRIPTION_NOTICE_WEBHOOK_URL` to deliver them somewhere a customer will see — the
+dashboard banner is the only other warning. Each notice is claimed in the database before it is sent,
+so replicas do not duplicate them.
+
+### The dashboard and the bundler
+
+The backend is not the whole deployment:
+
+* **The dashboard** (`web/`) is its own image: `docker build -t paymaster-web web`. Give it
+  `PAYMASTER_API_URL` (the backend, which then needs no public route of its own) and build it with
+  `--build-arg NEXT_PUBLIC_PRIVY_APP_ID=...`, which is baked in at build time.
+* **The bundler** is part of the product here, not an external dependency. The paymaster is staked at
+  0.02 ETH per chain, far below the 1 ETH minimum a stock rundler or a hosted bundler enforces, so
+  those reject every operation with `-32502`. Run your own with a matching floor — the chart's
+  `bundler.enabled=true` does this (`bundler.network`, `bundler.minStakeValue`, and a Secret holding
+  `NODE_HTTP` and the submitter key) — and give customers its URL for the SDK's `bundler.endpoint`.
+  One release per chain: rundler serves one network per process.
+
+### Alerts
+
+`deploy/monitoring/alertmanager/alertmanager.yml` routes criticals to a pager and everything to chat,
+reading both credentials from files under `/etc/alertmanager/secrets/`. The backend also pages
+directly (`ALERT_WEBHOOK_URL`) for what it detects itself — a drained deposit, a tripped RPC circuit,
+tenant ledger drift, an insolvent tenant paymaster. Two thresholds still ship as placeholders and must
+be tuned to real traffic: `PaymasterGasCommitmentSurge` and `PaymasterDenialSurge`.
 
 ## 5. First keys and policies
 

@@ -2,15 +2,26 @@
 
 import Link from "next/link";
 import {usePathname} from "next/navigation";
-import {LuCoins, LuKeyRound, LuLogOut, LuReceipt, LuShieldCheck, LuZap} from "react-icons/lu";
+import {
+  LuCoins,
+  LuKeyRound,
+  LuListChecks,
+  LuLogOut,
+  LuReceipt,
+  LuShieldCheck,
+  LuTriangleAlert,
+  LuZap,
+} from "react-icons/lu";
 import type {ReactNode} from "react";
 
 import {useAuth} from "@/components/auth-provider";
 import {SignIn} from "@/components/sign-in";
+import {formatDate, useAccountResource} from "@/lib/account";
 
 const NAV = [
   {href: "/dashboard", label: "Overview", icon: LuZap},
   {href: "/dashboard/keys", label: "API keys", icon: LuKeyRound},
+  {href: "/dashboard/policies", label: "Policies", icon: LuListChecks},
   {href: "/dashboard/funding", label: "Funding", icon: LuCoins},
   {href: "/dashboard/billing", label: "Billing", icon: LuReceipt},
 ] as const;
@@ -73,9 +84,62 @@ export function Shell({children}: {children: ReactNode}) {
       </aside>
 
       <main className="min-w-0 flex-1 px-4 py-6 sm:px-8">
-        <div className="mx-auto max-w-5xl">{children}</div>
+        <div className="mx-auto max-w-5xl">
+          <RenewalBanner />
+          {children}
+        </div>
       </main>
     </div>
+  );
+}
+
+interface SubscriptionSummary {
+  readonly status: {
+    readonly state: "active" | "grace" | "lapsed" | "none";
+    readonly paidThrough?: number;
+    readonly graceEndsAt?: number;
+    readonly renewalDue: boolean;
+  };
+}
+
+/**
+ * The notice before a subscription lapses, on every page rather than only on Billing.
+ *
+ * The backend's notice sweep sends the same warning by webhook; this is the half that does not depend
+ * on anyone having configured one. Rendered inside the session gate, so it never fetches for a
+ * signed-out visitor, and silent on any error — a banner that fails must not replace the page.
+ */
+function RenewalBanner() {
+  const pathname = usePathname();
+  const billing = useAccountResource<SubscriptionSummary>("subscription");
+  const status = billing.data?.status;
+  if (status === undefined || pathname.startsWith("/dashboard/billing")) return null;
+
+  let message: string | undefined;
+  if (status.state === "lapsed") {
+    message = "Your subscription has lapsed, so sponsorship is refused. Renew to restore it.";
+  } else if (status.state === "grace") {
+    message = `Your subscription has ended. Sponsorship stops on ${formatDate(status.graceEndsAt)} unless you renew.`;
+  } else if (status.renewalDue) {
+    message = `Your subscription ends on ${formatDate(status.paidThrough)}.`;
+  }
+  if (message === undefined) return null;
+
+  const urgent = status.state !== "active";
+  return (
+    <Link
+      href="/dashboard/billing"
+      className={`mb-6 flex items-center gap-2 rounded-md border px-3 py-2 text-[12px] transition-colors ${
+        urgent
+          ? "border-critical/30 bg-critical/10 text-critical hover:bg-critical/15"
+          : "border-warning/30 bg-warning/10 text-warning hover:bg-warning/15"
+      }`}
+    >
+      <LuTriangleAlert className="size-3.5 shrink-0" aria-hidden />
+      <span>
+        {message} <span className="underline underline-offset-2">Go to billing</span>
+      </span>
+    </Link>
   );
 }
 

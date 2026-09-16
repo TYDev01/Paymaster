@@ -18,11 +18,15 @@ import type {Principal} from "../../auth/authenticator.js";
 import {ApiKeyGuard, CurrentPrincipal, RequirePermissions} from "../guards/apiKey.guard.js";
 import {ZodValidationPipe} from "../pipes/zodValidation.pipe.js";
 import {
+  claimPaymentSchema,
+  type ClaimPaymentRequest,
+  controllerAssignmentSchema,
   createKeySchema,
   listAuditSchema,
   listSponsorshipsSchema,
   recordPaymentSchema,
   upsertPolicySchema,
+  type ControllerAssignmentRequest,
   type CreateKeyRequest,
   type RecordPaymentRequestDto,
   type UpsertPolicyRequest,
@@ -140,6 +144,23 @@ export class AdminController {
     return {funding: await this.service.listFunding(actorContext(principal, clientIp))};
   }
 
+  /**
+   * The platform's attestation naming a wallet as this tenant's withdrawal controller.
+   *
+   * `funding:write`, not `key:read`: a read-only member can see where the money is, but choosing
+   * which wallet it can be taken out to is authority over the money itself.
+   */
+  @Post("funding/controller")
+  @RequirePermissions("funding:write")
+  @HttpCode(HttpStatus.OK)
+  async issueControllerAssignment(
+    @Body(new ZodValidationPipe(controllerAssignmentSchema)) request: ControllerAssignmentRequest,
+    @CurrentPrincipal() principal: Principal,
+    @Ip() clientIp: string,
+  ) {
+    return this.service.issueControllerAssignment(request, actorContext(principal, clientIp));
+  }
+
   // ------------------------------------------------------------------------------------------
   // billing
   // ------------------------------------------------------------------------------------------
@@ -153,6 +174,27 @@ export class AdminController {
   @RequirePermissions("key:read")
   async getSubscription(@CurrentPrincipal() principal: Principal, @Ip() clientIp: string) {
     return this.service.getSubscription(actorContext(principal, clientIp));
+  }
+
+  /** Plans, the treasury, and this account's payment reference. Readable at every subscription state. */
+  @Get("billing")
+  @RequirePermissions("key:read")
+  async getBillingOptions(@CurrentPrincipal() principal: Principal, @Ip() clientIp: string) {
+    return this.service.getBillingOptions(actorContext(principal, clientIp));
+  }
+
+  /**
+   * Self-service payment: the customer names a transaction, the chain decides what it bought.
+   * `funding:write`, because it spends nothing but does change what the account is entitled to.
+   */
+  @Post("subscription/claim")
+  @RequirePermissions("funding:write")
+  async claimSubscriptionPayment(
+    @Body(new ZodValidationPipe(claimPaymentSchema)) request: ClaimPaymentRequest,
+    @CurrentPrincipal() principal: Principal,
+    @Ip() clientIp: string,
+  ) {
+    return this.service.claimSubscriptionPayment(request, actorContext(principal, clientIp));
   }
 
   /** Platform-only. See `AdminService.recordSubscriptionPayment` for why this one write widens. */

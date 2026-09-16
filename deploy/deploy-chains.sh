@@ -123,8 +123,8 @@ for i in $(seq 0 $((chain_count - 1))); do
     continue
   fi
 
-  deposit="$(echo "${entry}" | jq -r '.depositWei // "1000000000000000000"')"
-  stake="$(echo "${entry}" | jq -r '.stakeWei // "1000000000000000000"')"
+  deposit="$(echo "${entry}" | jq -r '.depositWei // "20000000000000000"')"
+  stake="$(echo "${entry}" | jq -r '.stakeWei // "20000000000000000"')"
   # Which paymaster contract this chain runs. Defaults to the single-tenant one, so a chains file
   # written before multi-tenancy existed keeps deploying exactly what it did before.
   kind="$(echo "${entry}" | jq -r '.paymasterKind // "verifying"')"
@@ -196,8 +196,8 @@ for i in $(seq 0 $((chain_count - 1))); do
     PAYMASTER_OWNER="${PAYMASTER_OWNER}" \
     PAYMASTER_SIGNER="${PAYMASTER_SIGNER}" \
     PAYMASTER_KIND="$(echo "${entry}" | jq -r '.paymasterKind // "verifying"')" \
-    DEPOSIT_WEI="$(echo "${entry}" | jq -r '.depositWei // "1000000000000000000"')" \
-    STAKE_WEI="$(echo "${entry}" | jq -r '.stakeWei // "1000000000000000000"')" \
+    DEPOSIT_WEI="$(echo "${entry}" | jq -r '.depositWei // "20000000000000000"')" \
+    STAKE_WEI="$(echo "${entry}" | jq -r '.stakeWei // "20000000000000000"')" \
     UNSTAKE_DELAY_SEC="$(echo "${entry}" | jq -r '.unstakeDelaySec // 86400')" \
     forge script script/DeployPaymaster.s.sol:DeployPaymaster \
       --rpc-url "${rpc_url}" \

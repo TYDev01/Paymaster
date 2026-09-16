@@ -1,7 +1,7 @@
 import {generateKeyPairSync, sign as signPayload, type KeyObject} from "node:crypto";
 import {describe, expect, it} from "vitest";
 
-import {PrivyIdentityProvider, type Jwk} from "../src/auth/privyIdentityProvider.js";
+import {PrivyIdentityProvider, type Jwk, type JwksFetcher} from "../src/auth/privyIdentityProvider.js";
 
 /**
  * Token verification, against real ES256 signatures.
@@ -242,5 +242,98 @@ describe("PrivyIdentityProvider refresh floor", () => {
     }
 
     expect(fetches(), "unknown kids must not each trigger a fetch").toBe(afterFirst);
+  });
+});
+
+/**
+ * Retrying the JWKS fetch.
+ *
+ * These exist because of a real outage: on Alpine, `getaddrinfo` intermittently returned
+ * `EAI_AGAIN` for the provider's host, the single fetch attempt failed, the key cache stayed empty,
+ * and every token was then rejected as `unknown-key`. Sign-in was completely down because of a name
+ * lookup that succeeded on the very next try.
+ */
+describe("PrivyIdentityProvider JWKS retry", () => {
+  const transient = () => Object.assign(new Error("fetch failed"), {cause: {code: "EAI_AGAIN"}});
+
+  function retrying(fetchJwks: JwksFetcher, onError?: (error: Error, cachedKeys: number) => void) {
+    const paused: number[] = [];
+    const p = new PrivyIdentityProvider(
+      {appId: APP_ID},
+      {
+        fetchJwks,
+        now: () => NOW,
+        // Injected so the retry is exercised without sleeping through the pause.
+        sleep: async (ms) => {
+          paused.push(ms);
+        },
+        ...(onError === undefined ? {} : {onError}),
+      },
+    );
+    return {provider: p, paused};
+  }
+
+  it("recovers from a transient failure rather than rejecting the token", async () => {
+    const key = keypair("k1");
+    let attempts = 0;
+    const {provider: p, paused} = retrying(async () => {
+      attempts += 1;
+      if (attempts === 1) throw transient();
+      return {keys: [key.jwk]};
+    });
+
+    // The whole point: one blip must not be a sign-in outage.
+    expect((await p.verify(token(key.privateKey, "k1", claims()))).ok).toBe(true);
+    expect(attempts).toBe(2);
+    expect(paused).toEqual([150]);
+  });
+
+  it("stops after the attempt limit, so a down provider cannot stretch a request without bound", async () => {
+    let attempts = 0;
+    const {provider: p} = retrying(async () => {
+      attempts += 1;
+      throw transient();
+    });
+
+    expect(await p.verify(token(keypair("k1").privateKey, "k1", claims()))).toEqual({
+      ok: false,
+      reason: "unknown-key",
+    });
+    expect(attempts, "two attempts, not an unbounded loop").toBe(2);
+  });
+
+  it("reports a failed refresh, naming the empty cache as the outage it is", async () => {
+    const seen: Array<{message: string; cachedKeys: number}> = [];
+    const {provider: p} = retrying(
+      async () => {
+        throw transient();
+      },
+      (error, cachedKeys) => seen.push({message: error.message, cachedKeys}),
+    );
+
+    await p.verify(token(keypair("k1").privateKey, "k1", claims()));
+
+    // Swallowing this is what made the original failure invisible: the only symptom was a 401.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.cachedKeys).toBe(0);
+  });
+
+  it("does not retry a 4xx, because a wrong app id does not become right on the second ask", async () => {
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response("no such app", {status: 404});
+    }) as typeof fetch;
+
+    try {
+      // No injected fetcher: this exercises the real #defaultFetch, which is where the status is
+      // classified.
+      const p = new PrivyIdentityProvider({appId: APP_ID}, {now: () => NOW});
+      expect((await p.verify(token(keypair("k1").privateKey, "k1", claims()))).ok).toBe(false);
+      expect(calls, "a 4xx is not a transient fault").toBe(1);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });

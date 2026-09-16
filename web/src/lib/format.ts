@@ -79,7 +79,7 @@ const CHAIN_NAMES: Record<string, string> = {
   "137": "Polygon",
   "8453": "Base",
   "42161": "Arbitrum",
-  "31337": "Local Anvil",
+  "11155111": "Ethereum Sepolia",
 };
 
 export function chainName(chainId: string): string {

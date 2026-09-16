@@ -30,6 +30,18 @@ import {FundingMonitor} from "../monitoring/fundingMonitor.js";
 import {OtlpTracer} from "../monitoring/otlpTracer.js";
 import {noopTracer, type Tracer} from "../monitoring/tracing.js";
 import {SpendReconciler} from "../reconciliation/spendReconciler.js";
+import {ChainRegistryTenantLedgerSource, TenantLedgerReconciler} from "../reconciliation/tenantLedgerReconciler.js";
+import {PostgresTenantLedgerStore} from "../db/postgresTenantLedgerStore.js";
+import {PaymentVerifier} from "../billing/paymentVerifier.js";
+import {parsePlansJson, type PlanCatalogue} from "../billing/plans.js";
+import {
+  CompositeSubscriptionNotifier,
+  LoggingSubscriptionNotifier,
+  SubscriptionNoticeService,
+  WebhookSubscriptionNotifier,
+  type SubscriptionNotifier,
+} from "../billing/subscriptionNotices.js";
+import {PlanCeilingPolicyRepository} from "../policy/planCeilings.js";
 import {ChainRegistryEventSource} from "../reconciliation/chainEventSource.js";
 import {PostgresSpendReconciliationStore} from "../db/postgresSpendReconciliationStore.js";
 import {AlwaysLeader, RedisLeaderLock, type LeaderLock} from "../monitoring/leaderLock.js";
@@ -104,6 +116,10 @@ export interface AppDependencies {
   readonly policyBroadcast?: PolicyBroadcast | undefined;
   /** Exchanges an identity-provider token for a tenant-scoped session. Absent without Privy. */
   readonly tenantSessions?: TenantSessionService | undefined;
+  /** The plan catalogue from PLANS. Absent (or empty) on a deployment that sells no plans. */
+  readonly plans?: PlanCatalogue | undefined;
+  /** Verifies self-service payment claims. Absent without BILLING_TREASURY_ADDRESS. */
+  readonly paymentVerifier?: PaymentVerifier | undefined;
   readonly env: Env;
 }
 
@@ -123,11 +139,16 @@ export class AppModule {
     // actually runs a multi-tenant paymaster asks it something.
     const tenantBalances = deps.tenantBalances ?? new TenantBalanceReader(deps.chains);
 
-    // `unsubscribedAllows` stays at its default of true: every tenant that predates the
-    // subscriptions table has no row, and flipping this would take a working deployment offline on
-    // upgrade. A deployment that sells subscriptions turns it off once its customers have rows.
+    // `unsubscribedAllows` defaults to true through SUBSCRIPTION_REQUIRED=false: every tenant that
+    // predates the subscriptions table has no row, and refusing them would take a working deployment
+    // offline on upgrade. A deployment that sells subscriptions sets it once its customers have rows.
     const subscriptionState =
-      deps.subscriptions === undefined ? undefined : new SubscriptionService(deps.subscriptions);
+      deps.subscriptions === undefined
+        ? undefined
+        : new SubscriptionService(deps.subscriptions, {
+            unsubscribedAllows: !deps.env.SUBSCRIPTION_REQUIRED,
+            noticeSeconds: deps.env.SUBSCRIPTION_NOTICE_SECONDS,
+          });
 
     const sponsorService = new SponsorService({
       chains: deps.chains,
@@ -161,6 +182,9 @@ export class AppModule {
       tenantBalances,
       subscriptions: deps.subscriptions,
       subscriptionState,
+      signer: deps.signer,
+      plans: deps.plans,
+      paymentVerifier: deps.paymentVerifier,
     });
 
     const providers: Provider[] = [
@@ -254,6 +278,10 @@ export async function buildDependencies(
 
   const quotas: QuotaStore = redis === undefined ? new InMemoryQuotaStore() : new RedisQuotaStore(redis);
 
+  // Parsed at startup like CHAINS: a malformed plan catalogue is a crash with the offending field
+  // named, never a deployment that quietly sells nothing or applies no ceilings.
+  const plans = parsePlansJson(env.PLANS, env.DEFAULT_PLAN_ID);
+
   // Policy changes reach every replica, not just the one that served the admin request. Without
   // Redis this is a no-op, which is correct: there are no other replicas to tell.
   const policyBroadcast: PolicyBroadcast =
@@ -289,11 +317,32 @@ export async function buildDependencies(
     await ensureBootstrapPolicy(policyRepository, env);
   }
 
-  const repository: PolicyRepository = policyRepository ?? {load: async () => makePolicies(quotas)};
+  const subscriptions = pool === undefined ? undefined : new SubscriptionRepository(pool);
+
+  // Plan ceilings wrap whatever the policies come from, so a tenant's own rules and their plan's
+  // limits are ANDed on every reload. Only with plans to apply and a record of who is on which.
+  const baseRepository: PolicyRepository = policyRepository ?? {load: async () => makePolicies(quotas)};
+  const repository: PolicyRepository =
+    subscriptions === undefined || plans.size === 0
+      ? baseRepository
+      : new PlanCeilingPolicyRepository(baseRepository, plans, subscriptions, quotas);
   const policySource = new PolicySource(repository);
   await policySource.reload();
 
-  const backgroundServices = buildBackgroundServices(env, {chains, policies: policySource, pool, metrics}, alerter);
+  const paymentVerifier =
+    env.BILLING_TREASURY_ADDRESS === undefined || plans.size === 0
+      ? undefined
+      : new PaymentVerifier(chains, {
+          treasury: env.BILLING_TREASURY_ADDRESS as `0x${string}`,
+          confirmations: env.BILLING_CONFIRMATIONS,
+          maxPeriodsPerPayment: env.BILLING_MAX_PERIODS_PER_PAYMENT,
+        });
+
+  const backgroundServices = buildBackgroundServices(
+    env,
+    {chains, policies: policySource, pool, metrics, subscriptions},
+    alerter,
+  );
   // The tracer's flush loop is a background service like any other, so shutdown drains the last
   // spans through the same lifecycle that stops the monitors.
   if (tracer instanceof OtlpTracer) backgroundServices.push(tracer);
@@ -338,6 +387,8 @@ export async function buildDependencies(
           maxSkewSeconds: env.REQUEST_SIGNING_MAX_SKEW_SECONDS,
         });
 
+  const privyLogger = new Logger("privy");
+
   // Dashboard sign-in needs three things: a provider to verify the person, somewhere to look up
   // what they may act within, and a signer for the session. Missing any one of them disables it,
   // and the endpoints say so rather than half-working.
@@ -345,15 +396,52 @@ export async function buildDependencies(
     env.PRIVY_APP_ID === undefined || pool === undefined || jwt === undefined
       ? undefined
       : new TenantSessionService(
-          new PrivyIdentityProvider({
-            appId: env.PRIVY_APP_ID,
-            jwksUrl: env.PRIVY_JWKS_URL,
-            issuer: env.PRIVY_ISSUER,
-            cacheTtlMs: env.PRIVY_JWKS_CACHE_MS,
-          }),
+          new PrivyIdentityProvider(
+            {
+              appId: env.PRIVY_APP_ID,
+              jwksUrl: env.PRIVY_JWKS_URL,
+              issuer: env.PRIVY_ISSUER,
+              cacheTtlMs: env.PRIVY_JWKS_CACHE_MS,
+            },
+            {
+              // An empty cache means nobody can sign in at all, so the two cases are logged at
+              // different levels: one is a degradation, the other is an outage.
+              onError: (error, cachedKeys) => {
+                const detail = `${error.message}${causeCode(error)}`;
+                if (cachedKeys === 0) {
+                  privyLogger.error(
+                    `could not fetch the Privy JWKS and no keys are cached: every sign-in will be ` +
+                      `refused until this succeeds (${detail})`,
+                  );
+                } else {
+                  privyLogger.warn(
+                    `could not refresh the Privy JWKS; continuing with ${cachedKeys} cached key(s) (${detail})`,
+                  );
+                }
+              },
+            },
+          ),
           new TenantRepository(pool),
           jwt,
-          {allowSelfSignup: env.TENANT_SELF_SIGNUP},
+          {
+            allowSelfSignup: env.TENANT_SELF_SIGNUP,
+            // Every self-signed-up tenant gets its own copy of the starter policy, under the id
+            // SponsorService looks for. The rules are the same ones `BOOTSTRAP_DEFAULT_POLICY`
+            // seeds, but scoped to THIS tenant — policies are resolved per tenant, so a shared one
+            // would be invisible to it.
+            //
+            // Enabling self-service signup IS the operator's decision to let strangers create
+            // working accounts, so it carries the policy decision with it. The bootstrap seeder's
+            // "only into an empty table" caution does not apply: this writes a policy for a tenant
+            // that was created a moment ago and has none, so it can never overwrite anyone's
+            // edited rules or resurrect one they deleted.
+            provisionPolicy:
+              policyRepository === undefined
+                ? undefined
+                : async (tenant) => {
+                    await policyRepository.upsert(forTenant(tenant), defaultPolicyDefinition(env));
+                  },
+          },
         );
 
   return {
@@ -372,7 +460,9 @@ export async function buildDependencies(
     sponsorships: pool === undefined ? undefined : new SponsorshipRepository(pool),
     policyRepository,
     audit: pool === undefined ? undefined : new AuditLogRepository(pool),
-    subscriptions: pool === undefined ? undefined : new SubscriptionRepository(pool),
+    subscriptions,
+    plans,
+    paymentVerifier,
     pool,
     redis,
     quotasAreLocal: redis === undefined,
@@ -463,10 +553,52 @@ function buildBackgroundServices(
     policies: PolicySource;
     pool: DatabasePool | undefined;
     metrics: PaymasterMetrics | undefined;
+    subscriptions?: SubscriptionRepository | undefined;
   },
   alerter: Alerter = new LoggingAlerter(),
 ): BackgroundService[] {
   const services: BackgroundService[] = [];
+
+  if (env.SUBSCRIPTION_NOTICE_ENABLED && deps.subscriptions !== undefined) {
+    // The log sink always; the webhook alongside it when configured, so a failed delivery is still
+    // recorded where an operator can find it.
+    const sinks: SubscriptionNotifier[] = [new LoggingSubscriptionNotifier()];
+    if (env.SUBSCRIPTION_NOTICE_WEBHOOK_URL !== undefined) {
+      sinks.push(
+        new WebhookSubscriptionNotifier({
+          url: env.SUBSCRIPTION_NOTICE_WEBHOOK_URL,
+          timeoutMs: env.ALERT_WEBHOOK_TIMEOUT_MS,
+          signingSecret: env.SUBSCRIPTION_NOTICE_SIGNING_SECRET,
+        }),
+      );
+    }
+    services.push(
+      new SubscriptionNoticeService(deps.subscriptions, new CompositeSubscriptionNotifier(sinks), {
+        intervalMs: env.SUBSCRIPTION_NOTICE_INTERVAL_MS,
+        noticeSeconds: env.SUBSCRIPTION_NOTICE_SECONDS,
+      }),
+    );
+  }
+
+  const tenantChainIds = deps.chains.adapters
+    .filter((adapter) => adapter.config.paymasterKind === "tenant")
+    .map((adapter) => adapter.chainId);
+  if (env.TENANT_LEDGER_RECONCILER_ENABLED && deps.pool !== undefined && tenantChainIds.length > 0) {
+    services.push(
+      new TenantLedgerReconciler(
+        new ChainRegistryTenantLedgerSource(deps.chains),
+        new PostgresTenantLedgerStore(deps.pool),
+        alerter,
+        {
+          intervalMs: env.RECONCILER_INTERVAL_MS,
+          confirmations: env.RECONCILER_CONFIRMATIONS,
+          maxBlockRange: env.RECONCILER_MAX_BLOCK_RANGE,
+          initialLookbackBlocks: env.RECONCILER_INITIAL_LOOKBACK_BLOCKS,
+          chainIds: tenantChainIds,
+        },
+      ),
+    );
+  }
 
   if (env.FUNDING_MONITOR_ENABLED && deps.chains.allChainIds.length > 0) {
     const metrics = deps.metrics;
@@ -534,13 +666,17 @@ async function ensureBootstrapPolicy(repository: PostgresPolicyRepository, env: 
  *     restarted. Rotating means setting a new BOOTSTRAP_API_KEY, which lands as a new row and
  *     leaves the revoked one auditable.
  */
-async function ensureBootstrapKey(pool: DatabasePool, secret: string): Promise<void> {
+export async function ensureBootstrapKey(pool: DatabasePool, secret: string): Promise<void> {
   const hash = hashApiKey(secret);
   await pool.query(
-    `INSERT INTO api_keys (id, name, key_hash, display_prefix, roles, enabled)
-     VALUES ($1, $2, $3, $4, ARRAY['admin'], true)
+    // `tenant_id` is NOT NULL as of migration 0004, and omitting it here meant every deployment
+    // WITH a database refused to boot — the in-memory path below had been updated to carry the
+    // default tenant and this one had not. Exported so a test can hold that line; nothing else
+    // exercised this function, which is why a total boot failure shipped unnoticed.
+    `INSERT INTO api_keys (tenant_id, id, name, key_hash, display_prefix, roles, enabled)
+     VALUES ($1, $2, $3, $4, $5, ARRAY['admin'], true)
      ON CONFLICT (key_hash) DO NOTHING`,
-    [`bootstrap-${hash.slice(0, 12)}`, "bootstrap admin key", hash, secret.slice(0, 16)],
+    [DEFAULT_TENANT_ID, `bootstrap-${hash.slice(0, 12)}`, "bootstrap admin key", hash, secret.slice(0, 16)],
   );
 }
 
@@ -573,4 +709,16 @@ function buildApiKeyStore(env: Env): ApiKeyStore {
       lastUsedAt: undefined,
     },
   ]);
+}
+
+/**
+ * The errno behind a failed `fetch`, when there is one.
+ *
+ * `fetch` reports every transport failure as the same "fetch failed", and the cause carries the
+ * part that distinguishes a DNS blip (`EAI_AGAIN`) from a refused connection or a timeout. Without
+ * it the log names the symptom and not the fault.
+ */
+function causeCode(error: Error): string {
+  const code = (error as {cause?: {code?: string}}).cause?.code;
+  return code === undefined ? "" : `: ${code}`;
 }

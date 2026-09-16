@@ -14,6 +14,10 @@ Requires Node 22+ and [Foundry](https://book.getfoundry.sh/). The backend's test
 Postgres, a real Redis and a real anvil, so install those too — they are not optional extras, they
 are how most of the suite runs.
 
+Note the split: the **test suite** still spins up its own throwaway anvil (`backend/test/support/
+anvil.ts` spawns and deploys to it), because verifying against a real chain is the point. The
+**running stack** does not — it targets Ethereum Sepolia.
+
 ```bash
 git clone --recurse-submodules <repo> && cd Paymaster
 npm install
@@ -29,16 +33,41 @@ instead of silently drifting from them.
 ### Running it
 
 ```bash
-anvil                        # terminal 1
-./deploy/local-setup.sh      # deploys everything, writes deploy/.env.local
-set -a && . deploy/.env.local && set +a
+./start.sh                   # the whole stack, against Sepolia
+```
+
+It checks Sepolia before it starts anything — that the paymaster has code, a non-zero deposit, and
+enough stake to clear the bundler's floor — then generates `CHAINS` from what it read rather than
+from anything transcribed. `--monitoring` adds Prometheus, Grafana and an OTel collector;
+`--skip-checks` skips the on-chain reads when you are offline or the RPC is rate limiting.
+
+To run just the backend against an already-running stack:
+
+```bash
+set -a && . .env && set +a   # written by ./start.sh
 npm run dev --workspace @paymaster/backend
 ```
 
-`local-setup.sh` produces the whole on-chain world — Multicall3, EntryPoint v0.7, a factory, a
-funded and staked paymaster, a smart account — and prints the config the backend, bundler and SDK
-all consume. Or bring up the full stack with `docker compose up`, and add
-`--profile monitoring` for Prometheus, Grafana and an OTel collector.
+There is no local devnet any more. A paymaster must be deployed to Sepolia first — see the README
+quickstart — because `start.sh` will not spend ETH on your behalf.
+
+### A quota gotcha while iterating
+
+Sponsorship reserves `maxCost` against the wallet's quota at signing time. The spend reconciler
+corrects that reservation from the receipt once the operation LANDS — so an operation that is
+signed and then never submitted leaves its reservation in place permanently.
+
+While debugging a bundler or an RPC that is not yet working, that adds up fast: fourteen failed
+attempts at ~0.007 ETH each exhausted a 0.1 ETH `wallet-daily-spend` quota without a single
+successful sponsorship, and the wallet then returned 429 for the rest of the day. The counters are
+in Redis and can be cleared during development:
+
+```bash
+docker compose exec redis redis-cli --scan --pattern 'quota:*<wallet>*'
+docker compose exec redis redis-cli DEL '<key>'
+```
+
+Do not do this in production — the reservation is what stops a wallet spending twice.
 
 ---
 

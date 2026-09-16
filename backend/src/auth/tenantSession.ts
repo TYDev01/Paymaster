@@ -1,5 +1,5 @@
 import type {Membership, TenantRepository, TenantRole} from "../db/tenantRepository.js";
-import {tenantId} from "../db/scope.js";
+import {tenantId, type TenantId} from "../db/scope.js";
 import type {IdentityProvider} from "./identity.js";
 import type {JwtService} from "./jwt.js";
 import type {Role} from "./permissions.js";
@@ -29,6 +29,23 @@ export interface TenantSessionOptions {
   readonly allowSelfSignup: boolean;
   /** Generates a tenant id. Injected so tests are deterministic. */
   readonly newTenantId?: () => string;
+  /**
+   * Gives a brand-new tenant a starter policy.
+   *
+   * A port, so this module depends on neither the policy engine nor PostgreSQL — the same shape
+   * SponsorshipRecorder uses for the same reason.
+   *
+   * WITHOUT THIS, SELF-SIGNUP PRODUCES AN ACCOUNT THAT CANNOT SPONSOR. `SponsorService` resolves
+   * `policies.get(caller.tenantId, DEFAULT_POLICY_ID)` within the caller's own tenant — correctly,
+   * so one customer can never be served another's rules — and a tenant with no policies has
+   * nothing to find. The customer can sign up, fund a balance on chain and mint a key, and only
+   * discover at the first sponsorship that the account was never able to work. The bootstrap
+   * seeder does not cover this: it fills an EMPTY policy table once, so the first tenant to exist
+   * gets a policy and every tenant created afterwards gets none.
+   *
+   * Optional because a deployment with `allowSelfSignup` off never creates tenants this way.
+   */
+  readonly provisionPolicy?: ((tenant: TenantId) => Promise<void>) | undefined;
 }
 
 export type SessionFailure =
@@ -115,6 +132,12 @@ export class TenantSessionService {
 
     const id = tenantId(this.options.newTenantId?.() ?? randomTenantId());
     const tenant = await this.tenants.createWithOwner({id, name, subject: verified.identity.subject});
+
+    // Before the session is minted, and deliberately NOT best-effort. Swallowing a failure here
+    // would hand back a working session for an account that can never sponsor — which is the exact
+    // failure this call exists to prevent, only now with a green light in front of it. Loud beats
+    // subtly broken: the tenant row survives, the upsert is idempotent, and a retry repairs it.
+    await this.options.provisionPolicy?.(id);
 
     return this.#mint(verified.identity.subject, {tenant, role: "owner"});
   }

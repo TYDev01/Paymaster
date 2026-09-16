@@ -256,6 +256,210 @@ paths:
       responses:
         "200": { description: Entries }
 
+  /admin/funding:
+    get:
+      tags: [admin]
+      summary: Where to fund this tenant, and what it holds
+      description: |
+        Per multi-tenant chain: the paymaster address, this tenant's `tenantKey` (the argument to
+        `depositFor`), the on-chain balance, and who may withdraw it. Always the CALLER'S own tenant,
+        even for a platform operator — this names where money can be sent. Chains running the
+        single-tenant paymaster are omitted. Requires `key:read`.
+      operationId: listFunding
+      responses:
+        "200":
+          description: Funding per chain
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  funding:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        chainId: { type: integer }
+                        chainName: { type: string }
+                        paymaster: { type: string }
+                        tenantKey: { type: string, description: keccak256 of the tenant id }
+                        balanceWei: { type: string, nullable: true, description: null when the chain did not answer }
+                        controller:
+                          type: object
+                          nullable: true
+                          properties:
+                            address: { type: string, description: the zero address when nobody controls it yet }
+                            activeAt: { type: integer, description: Unix seconds from which it may withdraw }
+                            active: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/funding/controller:
+    post:
+      tags: [admin]
+      summary: Attest that a wallet may withdraw this tenant's balance
+      description: |
+        Returns a signed `ControllerAssignment` for the named wallet, which the CUSTOMER then submits
+        to `TenantPaymaster.claimController`. No operator transaction is involved.
+
+        Refused with `409` when the balance already has a controller: replacing one is that
+        controller's own call (`transferController`) or the owner's, never the online signer's. The
+        claimed wallet cannot withdraw for `CONTROLLER_CLAIM_DELAY` (one day), during which the owner
+        can void the claim. Requires `funding:write`.
+      operationId: issueControllerAssignment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chainId, controller]
+              properties:
+                chainId: { type: integer }
+                controller: { type: string, description: the wallet that will withdraw }
+      responses:
+        "200":
+          description: A signed assignment, valid for 15 minutes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  chainId: { type: integer }
+                  paymaster: { type: string }
+                  tenantKey: { type: string }
+                  controller: { type: string }
+                  nonce: { type: string }
+                  deadline: { type: integer, description: Unix seconds }
+                  signature: { type: string }
+        "400": { description: The chain holds no per-tenant balances }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: The balance already has a controller }
+
+  /admin/billing:
+    get:
+      tags: [admin]
+      summary: Plans, the treasury address, and this account's payment reference
+      description: |
+        `paymentReference` is what a payment transfer must carry as its transaction data for this
+        account to be able to claim it. Requires `key:read`, and readable at every subscription state
+        — a customer who cannot see what to pay cannot pay it.
+      operationId: getBillingOptions
+      responses:
+        "200":
+          description: What is for sale
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plans:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        periodSeconds: { type: integer }
+                        priceWei: { type: object, additionalProperties: { type: string }, description: wei per period, keyed by chain id }
+                        limits:
+                          type: object
+                          properties:
+                            operationsPerDay: { type: string, nullable: true }
+                            weiPerDay: { type: string, nullable: true }
+                        chainIds: { type: array, nullable: true, items: { type: integer } }
+                  treasury: { type: string, nullable: true }
+                  paymentReference: { type: string, nullable: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/subscription:
+    get:
+      tags: [admin]
+      summary: This tenant's subscription and payment history
+      description: |
+        State is DERIVED from `paidThrough` and the clock, never stored. `renewalDue` marks the notice
+        window. Requires `key:read`.
+      operationId: getSubscription
+      responses:
+        "200":
+          description: Subscription state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: object
+                    properties:
+                      state: { type: string, enum: [active, grace, lapsed, none] }
+                      plan: { type: string }
+                      paidThrough: { type: integer }
+                      graceEndsAt: { type: integer }
+                      allowsSponsorship: { type: boolean }
+                      renewalDue: { type: boolean }
+                  payments: { type: array, items: { type: object } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/subscription/claim:
+    post:
+      tags: [admin]
+      summary: Credit a subscription payment made on chain
+      description: |
+        The customer sends the plan price to the treasury with their `paymentReference` as the
+        transaction data, then claims it here by hash. Amount, recipient, account and confirmations are
+        all read from the chain; nothing in this request decides what was bought. One transaction buys
+        one period however many times it is claimed. Requires `funding:write`.
+      operationId: claimSubscriptionPayment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chainId, txHash, planId]
+              properties:
+                chainId: { type: integer }
+                txHash: { type: string }
+                planId: { type: string }
+      responses:
+        "201": { description: Credited }
+        "400": { description: Unknown plan }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: That payment was already credited }
+        "422":
+          description: |
+            The transaction does not pay for this: `NOT_FOUND`, `REVERTED`, `WRONG_RECIPIENT`,
+            `WRONG_ACCOUNT`, `UNDERPAID`, `UNCONFIRMED` or `NOT_SOLD_ON_CHAIN` (in `code`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /admin/subscriptions/payments:
+    post:
+      tags: [admin]
+      summary: Record a payment against any tenant (platform only)
+      description: |
+        The one write that crosses the tenant boundary, because billing is something the platform does
+        TO an account. Requires `billing:write`, held only by the `platform` role. Customers use
+        `/admin/subscription/claim` instead.
+      operationId: recordSubscriptionPayment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenantId, plan, periodSeconds]
+              properties:
+                tenantId: { type: string }
+                plan: { type: string }
+                periodSeconds: { type: integer, description: added to max(now, paidThrough) }
+                amountWei: { type: string }
+                chainId: { type: integer }
+                txHash: { type: string }
+                note: { type: string }
+      responses:
+        "201": { description: Recorded }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: That transaction was already recorded }
+
 components:
   securitySchemes:
     ApiKey:

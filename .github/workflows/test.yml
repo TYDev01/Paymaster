@@ -107,6 +107,11 @@ jobs:
       - name: Fetch bundler (pinned version + checksum)
         run: npm run bundler:fetch --workspace @paymaster/backend
 
+      # The SDK's package exports point at its compiled output, and the backend's integration tests
+      # import it — so it is built before anything that resolves `@paymaster/sdk`.
+      - name: Build the SDK
+        run: npm run build --workspace @paymaster/sdk
+
       - name: Typecheck
         run: npm run typecheck --workspaces --if-present
 
@@ -161,11 +166,49 @@ jobs:
           echo "$output" | grep -q "invalid environment" \
             || { echo "::error::the image did not reach env validation — the entrypoint is broken"; exit 1; }
 
+      # The dashboard ships as its own image. Built here for the same reason the backend is: a
+      # standalone Next build that cannot find a traced file fails at `docker build`, not at review.
+      - name: Build the web image
+        run: docker build -t paymaster-web:ci web
+
+      - name: The web image serves
+        run: |
+          docker run -d --name web -p 3000:3000 paymaster-web:ci
+          for i in $(seq 1 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:3000/ && { echo "web is serving"; docker rm -f web; exit 0; }
+            sleep 1
+          done
+          docker logs web; docker rm -f web
+          echo "::error::the web image did not serve / within 30s"; exit 1
+
+      # What `npm publish` would ship: compiled JS and declarations, importable from plain Node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: The SDK builds and packs
+        run: |
+          npm ci
+          npm run build --workspace @paymaster/sdk
+          node -e "import('@paymaster/sdk').then(m => { if (!m.SponsoredBundlerClient) process.exit(1) })"
+          (cd sdk && npm pack --dry-run)
+
       - name: Install Helm
         uses: azure/setup-helm@v4
 
       - name: Lint the chart
         run: helm lint deploy/helm/paymaster
+
+      # The bundler is optional, so it must refuse to render without the values that make it work
+      # rather than producing a pod that rejects every operation.
+      - name: The chart refuses a bundler with no secret
+        run: |
+          if helm template paymaster deploy/helm/paymaster --set config.chains='[]' \
+              --set secrets.existingSecret=s --set bundler.enabled=true --set bundler.network=base > /dev/null 2>&1; then
+            echo "::error::the chart rendered a bundler with no secret; it should have failed"
+            exit 1
+          fi
 
       # A default `helm install` must fail LOUDLY on missing required values, not render YAML that
       # produces CrashLoopBackOff once applied.

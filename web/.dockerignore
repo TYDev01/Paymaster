@@ -1,0 +1,14 @@
+# Installed and built inside the image; a host copy would shadow the image's own and carry native
+# binaries for the wrong platform.
+node_modules
+.next
+*.tsbuildinfo
+
+# Local secrets and settings. `.env.local` holds this developer's Privy app id and API URL — it must
+# never be baked into an image that is pushed somewhere.
+.env
+.env.*
+!.env.example
+
+AGENTS.md
+CLAUDE.md

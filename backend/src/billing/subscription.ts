@@ -29,6 +29,12 @@ export interface SubscriptionStatus {
   readonly graceEndsAt: number | undefined;
   /** True when sponsorship is permitted. The single question the sponsorship path asks. */
   readonly allowsSponsorship: boolean;
+  /**
+   * True from `noticeSeconds` before `paidThrough` until the subscription lapses: the window in which
+   * the customer should renew. What the dashboard banner and the notice sweep both key on, so the
+   * two can never disagree about whether someone was warned.
+   */
+  readonly renewalDue: boolean;
 }
 
 export interface SubscriptionServiceOptions {
@@ -45,6 +51,8 @@ export interface SubscriptionServiceOptions {
   readonly now?: () => number;
   /** How long a status may be reused, in milliseconds. See the note on caching below. */
   readonly ttlMs?: number;
+  /** How long before `paidThrough` a subscription counts as due for renewal. Default seven days. */
+  readonly noticeSeconds?: number;
 }
 
 interface CacheEntry {
@@ -77,6 +85,7 @@ export class SubscriptionService {
   readonly #unsubscribedAllows: boolean;
   readonly #now: () => number;
   readonly #ttlMs: number;
+  readonly #noticeSeconds: number;
   readonly #cache = new Map<string, CacheEntry>();
 
   constructor(repository: SubscriptionRepository, options: SubscriptionServiceOptions = {}) {
@@ -84,6 +93,7 @@ export class SubscriptionService {
     this.#unsubscribedAllows = options.unsubscribedAllows ?? true;
     this.#now = options.now ?? (() => Math.floor(Date.now() / 1000));
     this.#ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
+    this.#noticeSeconds = options.noticeSeconds ?? 7 * 86_400;
   }
 
   async statusOf(tenantId: TenantId): Promise<SubscriptionStatus> {
@@ -100,6 +110,7 @@ export class SubscriptionService {
         paidThrough: undefined,
         graceEndsAt: undefined,
         allowsSponsorship: this.#unsubscribedAllows,
+        renewalDue: false,
       };
     }
 
@@ -116,6 +127,7 @@ export class SubscriptionService {
       // Grace allows: that is what a grace window IS. A window that stopped traffic would be a
       // lapse with a friendlier name.
       allowsSponsorship: state !== "lapsed",
+      renewalDue: state === "grace" || (state === "active" && now >= subscription.paidThrough - this.#noticeSeconds),
     };
   }
 

@@ -61,3 +61,19 @@ The name of the Secret providing sensitive env: the caller-managed one if set, e
 {{- include "paymaster.fullname" . -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Bundler labels. A DIFFERENT `app.kubernetes.io/name` from the backend, so the backend's Service,
+PodDisruptionBudget and HPA — which select on name + instance — can never match a bundler pod.
+*/}}
+{{- define "paymaster.bundlerSelectorLabels" -}}
+app.kubernetes.io/name: {{ include "paymaster.name" . }}-bundler
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}
+
+{{- define "paymaster.bundlerLabels" -}}
+helm.sh/chart: {{ include "paymaster.chart" . }}
+{{ include "paymaster.bundlerSelectorLabels" . }}
+app.kubernetes.io/component: bundler
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}

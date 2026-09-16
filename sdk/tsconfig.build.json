@@ -1,0 +1,19 @@
+{
+  // What gets published. The base config is `noEmit` and includes the tests, which is right for
+  // typechecking and wrong for a package: a consumer must receive JavaScript and declarations for
+  // `src` only, not TypeScript source their toolchain may not be set up to compile.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    // NodeNext rather than Bundler: the output has to resolve in plain Node as well as in a bundler,
+    // and every relative import in src already carries its `.js` extension, which NodeNext requires.
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  },
+  "include": ["src/**/*.ts"]
+}

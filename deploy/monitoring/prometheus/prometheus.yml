@@ -17,15 +17,15 @@ global:
 rule_files:
   - /etc/prometheus/alerts.yml
 
-# Alertmanager is intentionally NOT configured here. The backend already pages directly through
-# ALERT_WEBHOOK_URL for conditions it can detect itself (a drained deposit, a tripped circuit); these
-# rules cover what only a time series can see — rates, ratios and absence. Point them at your
-# Alertmanager by uncommenting below.
-#
-# alerting:
-#   alertmanagers:
-#     - static_configs:
-#         - targets: ["alertmanager:9093"]
+# Rules fire into Alertmanager (the `alertmanager` service in the same compose profile), which routes
+# criticals to a pager and everything to chat — see deploy/monitoring/alertmanager/alertmanager.yml.
+# The backend separately pages directly through ALERT_WEBHOOK_URL for conditions it can detect itself
+# (a drained deposit, a tripped circuit, tenant ledger drift); these rules cover what only a time
+# series can see — rates, ratios and absence.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
 
 scrape_configs:
   - job_name: paymaster-backend

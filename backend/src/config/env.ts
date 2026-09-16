@@ -244,6 +244,59 @@ export const envSchema = z
     REQUEST_SIGNING_SECRET: z.string().min(32, "must be at least 32 characters").optional(),
     /** Freshness window for a signed request's timestamp, bounding replay. */
     REQUEST_SIGNING_MAX_SKEW_SECONDS: z.coerce.number().int().min(5).max(3_600).default(300),
+
+    /**
+     * Subscription plans, as JSON. See `parsePlansJson` in billing/plans.ts for the shape. Unset means
+     * the deployment sells no plans: payments can still be recorded by the platform, but nothing is
+     * claimable self-service and no plan ceilings apply.
+     */
+    PLANS: z.string().optional(),
+    /** The plan a tenant with NO subscription row is held to — its ceilings and chain access. */
+    DEFAULT_PLAN_ID: z.string().min(1).optional(),
+    /**
+     * Refuse sponsorship for a tenant with no subscription row at all.
+     *
+     * Off by default, because every tenant that predates subscriptions has no row, and turning this
+     * on would take them offline on upgrade. A deployment that sells subscriptions turns it on once
+     * its customers have rows.
+     */
+    SUBSCRIPTION_REQUIRED: boolFromEnv(false),
+
+    /**
+     * Where customers send subscription payments, identical on every chain. Required for self-service
+     * payment claims; unset, the claim endpoint answers 503 and payments go through the operator.
+     * Must accept a plain transfer WITH calldata — an EOA, or a contract whose fallback is payable.
+     */
+    BILLING_TREASURY_ADDRESS: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/, "must be a 20-byte address")
+      .optional(),
+    /** Blocks a payment must be buried under before it buys time. */
+    BILLING_CONFIRMATIONS: z.coerce.number().int().min(1).max(1_000).default(5),
+    /** Cap on periods one transfer may buy. */
+    BILLING_MAX_PERIODS_PER_PAYMENT: z.coerce.number().int().min(1).max(36).default(12),
+
+    /**
+     * Notices before a subscription lapses.
+     *
+     * A sweep finds subscriptions ending within SUBSCRIPTION_NOTICE_SECONDS, and ones already in
+     * grace, and sends one notice for each (deduplicated per period in the database). The dashboard
+     * shows the same state as a banner regardless; the webhook is what reaches someone who is not
+     * looking at it — point it at your email or CRM integration.
+     */
+    SUBSCRIPTION_NOTICE_ENABLED: boolFromEnv(true),
+    SUBSCRIPTION_NOTICE_SECONDS: z.coerce.number().int().min(3_600).max(2_592_000).default(604_800),
+    SUBSCRIPTION_NOTICE_INTERVAL_MS: z.coerce.number().int().min(10_000).max(86_400_000).default(3_600_000),
+    SUBSCRIPTION_NOTICE_WEBHOOK_URL: z.string().url().optional(),
+    /** Optional HMAC secret; notices are signed exactly as generic alert webhooks are. */
+    SUBSCRIPTION_NOTICE_SIGNING_SECRET: z.string().min(32, "must be at least 32 characters").optional(),
+
+    /**
+     * Tenant ledger reconciliation: replays every TenantPaymaster balance movement and checks the
+     * result against the chain, plus the contract's solvency. Needs a database; a no-op without one
+     * or without a `tenant` chain. Shares the RECONCILER_* scan settings.
+     */
+    TENANT_LEDGER_RECONCILER_ENABLED: boolFromEnv(true),
   })
   .superRefine((env, ctx) => {
     // Exactly one signer source. Zero means the service cannot sign at all; both is ambiguous — which

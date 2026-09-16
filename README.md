@@ -5,7 +5,7 @@ platform: a verifying paymaster you own end to end, a sponsorship backend that d
 and a self-hosted bundler. No dependency on any hosted paymaster or bundler service.
 
 ```
-Wallet ──▶ SDK ──▶ Bundler (rundler) ──▶ EntryPoint ──▶ EVM chain
+Wallet ──▶ SDK ──▶ Bundler (rundler) ──▶ RPC router ──▶ EntryPoint ──▶ EVM chain
                 └──▶ Paymaster API ──▶ (policy + signature) ──▶ paymasterAndData
 ```
 
@@ -46,9 +46,9 @@ tests have each been shown to fail when the code they guard is broken. See
 | [sdk/](sdk/) | Framework-agnostic TypeScript SDK + runnable example |
 | [web/](web/) | The public site and the CUSTOMER dashboard (Next.js), on `:3000`. `/` explains the product; `/dashboard` is the signed-in account |
 | [frontend/](frontend/) | The OPERATOR console (Next.js), on `:3003`: live metrics, chains, funding, alerts |
-| [deploy/](deploy/) | Devnet setup, multi-chain deploy + verification, Helm chart, monitoring config, k6 load test |
-| [docker-compose.yml](docker-compose.yml) | Dev stack: postgres, redis, anvil, bundler, backend |
-| [docs/](docs/) | Architecture, security, deployment, operations, runbooks, DR, monitoring, development |
+| [deploy/](deploy/) | Multi-chain deploy + verification, the RPC router, an endpoint checker, Helm chart, monitoring config, k6 load test |
+| [docker-compose.yml](docker-compose.yml) | Stack: postgres, redis, rpc-router, bundler (Sepolia), backend |
+| [docs/](docs/) | Indexed at [docs/README.md](docs/README.md): integration, architecture, security, deployment, operations, runbooks, DR, monitoring, development |
 
 ### Ports, locally
 
@@ -62,6 +62,39 @@ rather than left to collide:
 | 3002 | Grafana |
 | 3003 | `frontend/` — the operator console |
 | 3100 | Backend API on the HOST. Inside its container it still listens on 3000, so nothing in Kubernetes changed |
+
+### The RPC router, and why the bundler needs one
+
+Rundler validates in safe mode, which enforces the ERC-7562 storage rules — the rules that make the
+paymaster's stake load-bearing. That requires `debug_traceCall` **with a custom JavaScript tracer**,
+and that one requirement narrows the field sharply:
+
+| Provider | `debug_traceCall` | Custom JS tracer |
+| --- | --- | --- |
+| QuickNode, Chainstack, self-hosted geth/reth | yes | **yes** |
+| Alchemy, Infura | yes, built-in tracers only | no — `-32600 invalid tracer value` |
+| Free public endpoints | no — `-32601` | no |
+
+The providers that qualify tend to meter hardest. QuickNode's free tier allows 15 requests/second,
+and rundler issues far more than that — measured at **369 ordinary reads per sponsored operation
+against 3 trace calls**. The endpoint that can validate gets exhausted by traffic that has nothing
+to do with validating.
+
+[deploy/rpc-router/](deploy/rpc-router/) splits the traffic by method: `debug_*` and `trace_*` go to
+the tracing provider, everything else to a second endpoint that never needs debug support. Both can
+be free tiers. Configure with `RPC_URL` (tracing) and `ALCHEMY_RPC_URL` (everything else) in
+`contracts/.env`.
+
+Before committing to a provider, check it:
+
+```bash
+./deploy/check-rpc.sh https://your-endpoint
+```
+
+Two more free-tier settings live in [docker-compose.yml](docker-compose.yml) and are documented
+there: `USER_OPERATION_EVENT_BLOCK_DISTANCE` (rundler's default searches block 0→latest, which
+every provider rejects) and `RUST_LOG` (rundler logs nothing by default, which makes every
+submission failure opaque).
 
 `web/` and `frontend/` are separate deployments on purpose. The operator console's server holds
 `PAYMASTER_ADMIN_KEY`, which reads and writes every tenant; the customer app authenticates as the
@@ -81,14 +114,37 @@ port it finds already served alone rather than fighting whoever owns it.
 ```bash
 ./start.sh status        # what is up, and where
 ./start.sh stop          # stop everything it started (data volumes are kept)
-./start.sh --fresh       # wipe the devnet chain and redeploy
+./start.sh --skip-checks # do not read Sepolia at boot (offline, or the RPC is rate limiting)
 ./start.sh --monitoring  # add Prometheus, Grafana and the OTel collector
 ./start.sh --no-ui       # backend stack only
 ```
 
+The stack runs against **Ethereum Sepolia**, not a local chain. `start.sh` does not deploy: it
+reads the paymaster out of `contracts/.env` (or the broadcast receipt), checks on chain that it has
+code, a deposit and enough stake for the bundler's floor, and generates `CHAINS` from what it found
+rather than from anything transcribed.
+
 Postgres and Redis are remapped automatically if their host ports are taken, because nothing in the
-stack reaches them that way — the backend uses the compose network. A conflict on anvil's 8545 or
-the bundler's 3001 is reported instead: those ARE addressed by name from the host.
+stack reaches them that way — the backend uses the compose network. A conflict on the bundler's
+3001 is reported instead: that one IS addressed by name from the host.
+
+### First, deploy a paymaster to Sepolia
+
+`start.sh` deliberately will not do this for you: it spends real ETH, and a boot script should not.
+Deploy once, and every later boot reads the result back.
+
+```bash
+cp contracts/.env.example contracts/.env
+$EDITOR contracts/.env      # DEPLOYER_KEY (funded), PAYMASTER_OWNER, PAYMASTER_SIGNER
+
+cd contracts
+set -a && source .env && set +a
+forge script script/DeployPaymaster.s.sol:DeployPaymaster \
+  --rpc-url "$RPC_URL" --broadcast --verify --private-key "$DEPLOYER_KEY"
+```
+
+Budget roughly `STAKE_WEI + DEPOSIT_WEI + ~0.007 ETH` of gas. The deploy funds and stakes in the
+same broadcast, because a paymaster is non-functional without both.
 
 ### Doing it by hand
 
@@ -99,34 +155,32 @@ Requires Foundry, Node ≥ 22, PostgreSQL 16, Redis, and the rundler binary.
 npm install
 npm run bundler:fetch --workspace @paymaster/backend
 
-# 2. Start a local chain and stand up a complete devnet:
-#    Multicall3, EntryPoint, factory, a funded + STAKED paymaster, a SimpleAccount, an API key.
-anvil &
-./deploy/local-setup.sh
-set -a && source deploy/.env.local && set +a
+# 2. Point the stack at Sepolia. Both are required — compose refuses to start without them.
+#    BUNDLER_SIGNER_KEY is an EOA that PAYS for the bundles it submits, in real Sepolia ETH.
+export SEPOLIA_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+export BUNDLER_SIGNER_KEY=0x...
 
-# 3. Start the bundler and the backend (see deploy/.env.local for the values)
-#    then run the end-to-end example:
-cd sdk && npx tsx examples/sponsor-and-send.ts
+# 3. Start the bundler and the backend, then run the end-to-end example against Sepolia:
+cd sdk && SMART_ACCOUNT=0x... ACCOUNT_OWNER_KEY=0x... API_KEY=... npx tsx examples/sponsor-and-send.ts
 #    -> success: true; account balance (unchanged, it paid nothing): 0 wei
 ```
 
+The smart account is yours to provide — on Sepolia nothing deploys one for you. It need not hold a
+balance (that is the point of the paymaster), but it must already be deployed or validation fails
+with AA20.
+
 ### Or the whole thing in Docker
 
-The contracts have to exist before the backend starts — it validates `CHAINS` at boot and refuses a
-chain whose EntryPoint has no code — so the chain comes up first:
-
 ```bash
-docker compose up -d anvil
-./deploy/local-setup.sh                    # deploys EntryPoint, factory, paymaster; writes deploy/.env.local
-
-# Put the generated values in .env, pointing CHAINS at the container network rather than localhost:
-#   SPONSORSHIP_SIGNER_KEY / BOOTSTRAP_API_KEY  copied from deploy/.env.local
-#   CHAINS                                      same, with http://127.0.0.1:8545 -> http://anvil:8545
+# CHAINS names the paymaster, so it must exist on chain before the backend starts — the backend
+# validates CHAINS at boot and refuses a chain whose EntryPoint has no code.
 docker compose up -d                       # postgres, redis, bundler, backend
 
 cd sdk && npx tsx examples/sponsor-and-send.ts
 ```
+
+`./start.sh` writes `.env` for you; by hand, it needs `CHAINS`, `SPONSORSHIP_SIGNER_KEY`,
+`BOOTSTRAP_API_KEY`, `SEPOLIA_RPC_URL`, `BUNDLER_SIGNER_KEY` and `MIN_STAKE_VALUE`.
 
 Add `--profile monitoring` for Prometheus, Grafana (:3002) and an OTel collector. If the host
 already runs Postgres or Redis, set `POSTGRES_HOST_PORT` / `REDIS_HOST_PORT` in `.env` — nothing
@@ -184,7 +238,7 @@ something to point at mainnet without the hardening listed below.**
 | Operations console (Next.js) | ✅ reads the real /metrics, /health and admin API |
 | Docker Compose stack | ✅ booted end to end, incl. the monitoring profile |
 
-Coverage is measured against the full suite — Postgres, Redis, anvil, rundler and a mainnet fork
+Coverage is measured against the full suite — Postgres, Redis, a test-spawned anvil, rundler and a mainnet fork
 included — not estimated:
 
 | | Lines | Statements | Branches | Functions |
@@ -208,8 +262,13 @@ Full detail, including what was deliberately *not* built and why, is in
 
 ## Documentation
 
+Start at **[docs/README.md](docs/README.md)** — it routes by audience, because all but one of these
+are written for the person RUNNING the platform rather than the person integrating with it.
+
 | | |
 | --- | --- |
+| [docs/README.md](docs/README.md) | Index, and the five things that surprise people |
+| [INTEGRATION.md](docs/INTEGRATION.md) | **For customers**: sign up, fund, mint a key, call the SDK |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Structure, and the reasoning behind it |
 | [SECURITY.md](docs/SECURITY.md) | Security guide and threat model |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Production deployment, in order, with a checklist |

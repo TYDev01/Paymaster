@@ -1,0 +1,134 @@
+{{- if .Values.bundler.enabled }}
+{{- /*
+The bundler, run by us, because the paymaster's stake is below what a hosted bundler accepts.
+
+A paymaster that reads its own storage during validation must be staked, and HOW MUCH is each
+bundler's policy: rundler's stock minimum is 1 ETH, and hosted bundlers set similar floors. This
+platform stakes far less per chain, so a customer's SDK has to be pointed at a bundler that was
+started with a matching `MIN_STAKE_VALUE` — this one. Without it every operation is refused with
+-32502 before reaching the chain.
+
+Its own `app.kubernetes.io/name`, deliberately. Reusing the backend's selector labels would put these
+pods behind the backend's Service, PodDisruptionBudget and HPA, and a sponsorship request would
+intermittently land on a JSON-RPC server that does not know the route.
+*/}}
+{{- $name := printf "%s-bundler" (include "paymaster.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- $minStake := required "bundler.minStakeValue is required: it must be <= the stake on every paymaster this bundler serves, or it rejects them all with -32502" .Values.bundler.minStakeValue }}
+{{- $network := required "bundler.network is required, e.g. ethereum_sepolia or base (a rundler built-in chain spec)" .Values.bundler.network }}
+{{- if not .Values.bundler.existingSecret }}
+{{- fail "bundler.existingSecret is required: a Secret holding NODE_HTTP (the RPC URL, usually a credential) and SIGNER_PRIVATE_KEYS or SIGNER_AWS_KMS_KEY_IDS (the EOA that pays for bundles)" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "paymaster.bundlerLabels" . | nindent 4 }}
+spec:
+  # One replica per signer set. Two rundler instances submitting from the same EOA race each other
+  # for nonces and fail bundles; scale by adding signers, not replicas.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "paymaster.bundlerSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "paymaster.bundlerSelectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: rundler
+          image: "{{ .Values.bundler.image.repository }}:{{ .Values.bundler.image.tag }}"
+          imagePullPolicy: {{ .Values.bundler.image.pullPolicy }}
+          args: ["node"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: rpc
+              containerPort: 3001
+              protocol: TCP
+            - name: metrics
+              containerPort: 8081
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: {{ .Values.bundler.existingSecret }}
+          env:
+            - name: NETWORK
+              value: {{ $network | quote }}
+            - name: ENABLED_ENTRY_POINTS
+              value: "v0.7"
+            - name: RPC_HOST
+              value: "0.0.0.0"
+            - name: RPC_PORT
+              value: "3001"
+            - name: METRICS_PORT
+              value: "8081"
+            - name: MIN_STAKE_VALUE
+              value: {{ $minStake | quote }}
+            - name: USER_OPERATION_EVENT_BLOCK_DISTANCE
+              value: {{ .Values.bundler.userOperationEventBlockDistance | quote }}
+            - name: PROVIDER_RATE_LIMIT_RETRY_ENABLED
+              value: "true"
+            - name: RUST_LOG
+              value: {{ .Values.bundler.logLevel | quote }}
+            {{- with .Values.bundler.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # rundler accepts connections before it can serve, so a TCP probe reports ready too early.
+          # The image ships neither curl nor wget; a JSON-RPC round trip over bash's /dev/tcp is the
+          # same probe the compose stack uses.
+          readinessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - >-
+                  body='{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}';
+                  exec 3<>/dev/tcp/127.0.0.1/3001 || exit 1;
+                  printf 'POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "${#body}" "$body" >&3;
+                  grep -q '"result"' <&3
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: rpc
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.bundler.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "paymaster.bundlerLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: rpc
+      port: 3001
+      targetPort: rpc
+      protocol: TCP
+    - name: metrics
+      port: 8081
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    {{- include "paymaster.bundlerSelectorLabels" . | nindent 4 }}
+{{- end }}
