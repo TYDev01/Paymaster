@@ -17,8 +17,17 @@ import {api, sessionToken} from "@/lib/session";
  */
 const ALLOWED = {
   keys: {path: "/admin/keys", methods: ["GET", "POST"], key: "keys"},
-  policies: {path: "/admin/policies", methods: ["GET"], key: "policies"},
+  // POST upserts one of the tenant's own policies. Plan ceilings are appended server-side on load, so
+  // nothing a customer writes here can lift them.
+  policies: {path: "/admin/policies", methods: ["GET", "POST"], key: "policies"},
+  billing: {path: "/admin/billing", methods: ["GET"], key: undefined},
+  // Only a transaction hash and a plan go up; the backend reads amount, recipient and account from
+  // the chain, so this cannot be used to grant time that was not paid for.
+  claim: {path: "/admin/subscription/claim", methods: ["POST"], key: undefined},
   funding: {path: "/admin/funding", methods: ["GET"], key: "funding"},
+  // Returns a signed attestation for the wallet the customer names; the backend refuses it for a
+  // balance that already has a controller, and the wallet still has to submit it on chain.
+  controller: {path: "/admin/funding/controller", methods: ["POST"], key: undefined},
   subscription: {path: "/admin/subscription", methods: ["GET"], key: undefined},
   sponsorships: {path: "/admin/sponsorships", methods: ["GET"], key: "sponsorships"},
 } as const satisfies Record<string, {path: string; methods: readonly string[]; key: string | undefined}>;

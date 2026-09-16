@@ -13,6 +13,13 @@ import {
   TargetAllowlistRule,
 } from "./rules/accessLists.js";
 import {TokenOwnershipRule, type TokenBalanceReader} from "./rules/tokenOwnership.js";
+import {DEFAULT_TENANT_ID, type TenantId} from "../db/scope.js";
+
+/**
+ * Quota names with this prefix belong to plan ceilings (see planCeilings.ts). A tenant rule using one
+ * would share a counter with its own ceiling and be charged twice per operation.
+ */
+export const RESERVED_QUOTA_PREFIX = "platform:";
 
 /**
  * Turns stored rule rows into rule objects.
@@ -93,7 +100,14 @@ const RULE_SCHEMAS = {
       "must set `token`, `tokenByChain`, or both — otherwise no chain has a token to check",
     ),
   quota: z.object({
-    name: z.string().min(1).max(64),
+    name: z
+      .string()
+      .min(1)
+      .max(64)
+      .refine(
+        (name) => !name.startsWith(RESERVED_QUOTA_PREFIX),
+        `names beginning "${RESERVED_QUOTA_PREFIX}" are reserved for plan ceilings`,
+      ),
     subject: z.enum(["wallet", "ip", "apiKey", "chain", "target", "global"]),
     unit: z.enum(["operations", "wei"]),
     limit: bigintSchema,
@@ -142,7 +156,11 @@ export class PolicyFactory {
     private readonly tokenReader?: TokenBalanceReader,
   ) {}
 
-  build(policyId: string, spec: PolicyRuleSpec): PolicyRule {
+  /**
+   * @param tenant Whose policy this is. Scopes quota counters to that tenant; see
+   *   `QuotaRuleOptions.namespace`. Omitted, or the default tenant, keeps the unscoped key shape.
+   */
+  build(policyId: string, spec: PolicyRuleSpec, tenant?: TenantId): PolicyRule {
     if (!isRuleType(spec.ruleType)) {
       throw new InvalidRuleConfigError(
         policyId,
@@ -160,14 +178,18 @@ export class PolicyFactory {
       );
     }
 
-    return this.#construct(spec.ruleType, parsed.data);
+    return this.#construct(
+      spec.ruleType,
+      parsed.data,
+      tenant === undefined || tenant === DEFAULT_TENANT_ID ? "" : tenant,
+    );
   }
 
   /**
    * Note the absence of a `default` branch. `RuleType` is derived from RULE_SCHEMAS, so adding a
    * schema without a constructor is a compile error rather than a runtime surprise.
    */
-  #construct(ruleType: RuleType, config: RuleConfig): PolicyRule {
+  #construct(ruleType: RuleType, config: RuleConfig, namespace: string): PolicyRule {
     switch (ruleType) {
       case "token-ownership": {
         if (this.tokenReader === undefined) {
@@ -211,6 +233,7 @@ export class PolicyFactory {
           unit: c.unit,
           limit: c.limit,
           windowSeconds: c.windowSeconds,
+          namespace,
           ...(c.onMissingSubject === undefined ? {} : {onMissingSubject: c.onMissingSubject}),
         });
       }

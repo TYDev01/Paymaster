@@ -59,6 +59,24 @@ If the deployment uses a *verifying* paymaster rather than a tenant one, there i
 yours to fund: the operator sponsors from a single shared deposit and your usage is bounded by
 policy alone. The funding page says so when that is the case.
 
+### Taking funds back out
+
+The balance is yours, and getting it out does not involve us. It takes two steps the first time:
+
+1. On `/dashboard/funding`, press **Use this wallet**. That asks the platform to sign an attestation
+   naming your wallet as this balance's withdrawal wallet, and your wallet submits it. Nobody at the
+   platform sends a transaction.
+2. **Withdrawals open 24 hours later.** The attestation is signed by the same online key that approves
+   sponsorships, so if that key were ever stolen it could name an attacker's wallet on a balance
+   nobody had claimed. The delay is the window in which such a claim is visible and can be cancelled.
+
+After that, withdrawing is one transaction from that wallet, whenever you like. It can also hand
+control to another wallet immediately — whoever holds the key can already withdraw, so waiting would
+protect nobody. If the wallet is lost, the operator can reset the withdrawal wallet for you.
+
+A balance that already has a withdrawal wallet cannot be re-pointed by the platform's signature.
+That is deliberate: it is what stops a compromised platform key from redirecting a customer's money.
+
 ## 3. Mint an API key
 
 `/dashboard/keys` → **Sponsor** role → mint. The secret is shown once and stored only as a hash; if
@@ -142,6 +160,40 @@ if you are not looking. The dashboard shows the balance; the operator's `Funding
 below a threshold, but that alert goes to *them*, not to you.
 
 ---
+
+## 6. Keep your subscription paid
+
+Platform access is a prepaid period, separate from gas. Gas comes out of your own on-chain balance;
+the subscription buys access and your quota tier. They fail differently and independently: an empty
+balance fails one operation, a lapsed subscription stops sponsorship entirely.
+
+On `/dashboard/billing`, pick a plan and press **Pay**. Your wallet sends the price to the platform's
+subscription address with your account's payment reference as the transaction data, and the page
+claims it once it has enough confirmations. The backend reads the amount, recipient and account from
+the chain — a transfer without your reference cannot be credited to you, and one transaction buys one
+period however many times it is claimed.
+
+If you close the tab while it confirms, nothing is lost: **Already paid? Claim a transaction** takes
+the hash and credits it.
+
+Paying early ADDS to the period you have left rather than replacing it, so there is no reason to wait
+until the last day. You will see a banner in the dashboard a week before the period ends, and again
+during the grace window; if your operator has configured notices, the same warnings arrive by webhook.
+
+**What a lapse does and does not do.** Sponsorship stops. Your balance, keys, policies and history are
+untouched, you can still sign in, and service resumes the moment a payment is credited. Withdrawal
+still works — a lapsed subscription never traps your money.
+
+## Your plan's limits
+
+Your plan sets ceilings that your own policies cannot raise: operations per day, gas per day, and
+which chains you may sponsor on. They apply per ACCOUNT, across every policy and every key, so
+splitting traffic across keys does not widen them.
+
+Inside those ceilings, `/dashboard/policies` is yours to edit — tighten anything you like: allowlist
+your contracts, cap per-wallet usage, block value transfers. A rule that sets a limit higher than your
+plan's simply does not bind; the lower of the two always wins. Denials name the rule that refused, so
+a `QUOTA_EXCEEDED` mentioning a `platform:` rule is the plan ceiling rather than a rule you wrote.
 
 ## When it goes wrong
 

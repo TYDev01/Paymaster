@@ -71,9 +71,7 @@ export default function KeysPage() {
         ) : keys.error !== undefined ? (
           <ErrorNote message={keys.error} onRetry={keys.reload} />
         ) : (keys.data ?? []).length === 0 ? (
-          <Empty>
-            No keys yet. Mint one above — your dApp cannot call the paymaster without it.
-          </Empty>
+          <Empty>No keys yet. Mint one above — your dApp cannot call the paymaster without it.</Empty>
         ) : (
           <KeyTable keys={keys.data ?? []} />
         )}
@@ -98,15 +96,15 @@ function SecretPanel({created, onDismiss}: {created: CreatedKey; onDismiss: () =
         <LuTriangleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
         <span>
           <span className="font-medium">Copy this now.</span>{" "}
-          {created.warning ?? "The secret is shown once and is not recoverable."} We store only its
-          hash, so if it is lost the only fix is to mint a replacement and revoke this one.
+          {created.warning ?? "The secret is shown once and is not recoverable."} We store only its hash, so if it is
+          lost the only fix is to mint a replacement and revoke this one.
         </span>
       </p>
 
       <p className="mt-2 pl-6 text-[11px] leading-relaxed text-ash-500">
-        Keep it on a server you control. A key is a bearer secret with no origin binding, so one
-        shipped to a browser can be read out of the page by anyone who loads it and used to spend
-        your balance until it is empty. Have your own backend hold it and decide who gets sponsored.
+        Keep it on a server you control. A key is a bearer secret with no origin binding, so one shipped to a browser
+        can be read out of the page by anyone who loads it and used to spend your balance until it is empty. Have your
+        own backend hold it and decide who gets sponsored.
       </p>
 
       <div className="mt-3 flex items-center gap-2 rounded-md border border-ash-800 bg-oil-950 px-3 py-2">
@@ -192,8 +190,8 @@ function MintForm({onCreated}: {onCreated: (key: CreatedKey) => void}) {
             className="mt-1.5 w-full rounded-md border border-ash-800 bg-oil-950 px-3 py-2 text-sm text-ash-100 outline-none transition-colors focus:border-ash-600 placeholder:text-ash-700"
           />
           <p className="mt-1 text-[11px] text-ash-600">
-            For you, not for the paymaster. Name it after the thing that will hold it, so a key you
-            need to revoke later is the one you can identify.
+            For you, not for the paymaster. Name it after the thing that will hold it, so a key you need to revoke later
+            is the one you can identify.
           </p>
         </div>
 
@@ -204,9 +202,7 @@ function MintForm({onCreated}: {onCreated: (key: CreatedKey) => void}) {
               <label
                 key={option.value}
                 className={`flex cursor-pointer gap-2.5 rounded-md border px-3 py-2 transition-colors ${
-                  role === option.value
-                    ? "border-ash-600 bg-oil-800/60"
-                    : "border-ash-800 hover:border-ash-700"
+                  role === option.value ? "border-ash-600 bg-oil-800/60" : "border-ash-800 hover:border-ash-700"
                 }`}
               >
                 <input
@@ -245,8 +241,8 @@ function MintForm({onCreated}: {onCreated: (key: CreatedKey) => void}) {
             ))}
           </div>
           <p className="mt-1 text-[11px] text-ash-600">
-            A label in the key’s prefix, so a test credential is recognisable in a log. It does not
-            change what the key may do.
+            A label in the key’s prefix, so a test credential is recognisable in a log. It does not change what the key
+            may do.
           </p>
         </fieldset>
 
@@ -310,10 +306,9 @@ function KeyTable({keys}: {keys: readonly ApiKey[]}) {
       </div>
       <div className="border-t border-ash-800/60 p-4">
         <Note>
-          Revoking a key is not yet possible from this page — the dashboard proxy allows only reads
-          and mints. Until it is, revoke with{" "}
-          <code className="font-mono text-ash-400">DELETE /admin/keys/&lt;id&gt;</code> using a key
-          that holds <code className="font-mono text-ash-400">key:write</code>.
+          Revoking a key is not yet possible from this page — the dashboard proxy allows only reads and mints. Until it
+          is, revoke with <code className="font-mono text-ash-400">DELETE /admin/keys/&lt;id&gt;</code> using a key that
+          holds <code className="font-mono text-ash-400">key:write</code>.
         </Note>
       </div>
     </>

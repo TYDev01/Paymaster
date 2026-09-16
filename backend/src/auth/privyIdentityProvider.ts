@@ -268,9 +268,7 @@ export class PrivyIdentityProvider implements IdentityProvider {
     });
     if (!response.ok) {
       const message = `jwks endpoint returned ${response.status}`;
-      throw response.status >= 400 && response.status < 500
-        ? new JwksClientError(message)
-        : new Error(message);
+      throw response.status >= 400 && response.status < 500 ? new JwksClientError(message) : new Error(message);
     }
     return (await response.json()) as {keys: Jwk[]};
   }

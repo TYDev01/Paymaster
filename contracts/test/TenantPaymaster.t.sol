@@ -449,8 +449,211 @@ contract TenantPaymasterTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                      SELF-SERVICE CONTROLLER CLAIMS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_aCustomerClaimsControlWithThePlatformsAttestationAndNoOwnerTransaction() public {
+        vm.deal(address(this), 2 ether);
+        paymaster.depositFor{value: 2 ether}(ACME);
+        address customer = makeAddr("customer");
+
+        uint48 deadline = uint48(block.timestamp + 1 hours);
+        bytes memory attestation = _controllerAttestation(ACME, customer, deadline);
+
+        // Submitted by the customer's own wallet. The owner never acts.
+        vm.prank(customer);
+        paymaster.claimController(ACME, customer, deadline, attestation);
+
+        assertEq(paymaster.controllerOf(ACME), customer);
+        assertEq(paymaster.controllerActiveAt(ACME), block.timestamp + paymaster.CONTROLLER_CLAIM_DELAY());
+
+        vm.warp(block.timestamp + paymaster.CONTROLLER_CLAIM_DELAY());
+        vm.prank(customer);
+        paymaster.withdrawFor(ACME, payable(customer), 1 ether);
+        assertEq(customer.balance, 1 ether, "the customer could not take their own money out");
+    }
+
+    function test_aClaimedControllerWaitsOutTheDelayBeforeWithdrawing() public {
+        vm.deal(address(this), 1 ether);
+        paymaster.depositFor{value: 1 ether}(ACME);
+        address customer = makeAddr("customer");
+        uint48 deadline = uint48(block.timestamp + 1 hours);
+        paymaster.claimController(ACME, customer, deadline, _controllerAttestation(ACME, customer, deadline));
+
+        // The window in which a claim made with a stolen signer key can be seen and cancelled.
+        uint256 activeAt = paymaster.controllerActiveAt(ACME);
+        vm.prank(customer);
+        vm.expectRevert(abi.encodeWithSelector(TenantPaymaster.ControllerNotYetActive.selector, ACME, activeAt));
+        paymaster.withdrawFor(ACME, payable(customer), 1 wei);
+    }
+
+    function test_theOwnerCancelsAClaimAndVoidsItsAttestation() public {
+        address attacker = makeAddr("attacker");
+        uint48 deadline = uint48(block.timestamp + 1 hours);
+        bytes memory attestation = _controllerAttestation(ACME, attacker, deadline);
+        paymaster.claimController(ACME, attacker, deadline, attestation);
+
+        vm.prank(owner);
+        paymaster.setController(ACME, address(0));
+        assertEq(paymaster.controllerOf(ACME), address(0));
+
+        // Replaying the same attestation now fails: the cancellation consumed its nonce, so the tenant
+        // being controller-less again does not reopen the door it just closed.
+        vm.expectRevert(TenantPaymaster.InvalidControllerAssignment.selector);
+        paymaster.claimController(ACME, attacker, deadline, attestation);
+    }
+
+    function test_aClaimCannotReplaceAnExistingController() public {
+        address customer = makeAddr("customer");
+        vm.prank(owner);
+        paymaster.setController(ACME, customer);
+
+        // The online signer must never be able to take a balance away from whoever controls it.
+        address intruder = makeAddr("intruder");
+        uint48 deadline = uint48(block.timestamp + 1 hours);
+        bytes memory attestation = _controllerAttestation(ACME, intruder, deadline);
+        vm.expectRevert(abi.encodeWithSelector(TenantPaymaster.ControllerAlreadySet.selector, ACME, customer));
+        paymaster.claimController(ACME, intruder, deadline, attestation);
+    }
+
+    function test_refusesAnExpiredAttestation() public {
+        address customer = makeAddr("customer");
+        uint48 deadline = uint48(block.timestamp + 1 hours);
+        bytes memory attestation = _controllerAttestation(ACME, customer, deadline);
+
+        vm.warp(uint256(deadline) + 1);
+        vm.expectRevert(abi.encodeWithSelector(TenantPaymaster.ControllerAssignmentExpired.selector, deadline));
+        paymaster.claimController(ACME, customer, deadline, attestation);
+    }
+
+    function test_refusesAnAttestationFromAnUnauthorisedSigner() public {
+        address customer = makeAddr("customer");
+        uint48 deadline = uint48(block.timestamp + 1 hours);
+        (, uint256 strangerKey) = makeAddrAndKey("stranger");
+        bytes32 digest =
+            paymaster.getControllerAssignmentHash(ACME, customer, paymaster.controllerNonce(ACME), deadline);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(strangerKey, digest);
+
+        vm.expectRevert(TenantPaymaster.InvalidControllerAssignment.selector);
+        paymaster.claimController(ACME, customer, deadline, abi.encodePacked(r, s, v));
+    }
+
+    function test_refusesAMalformedAttestation() public {
+        uint48 deadline = uint48(block.timestamp + 1 hours);
+        vm.expectRevert(TenantPaymaster.InvalidControllerAssignment.selector);
+        paymaster.claimController(ACME, makeAddr("customer"), deadline, hex"0badc0de");
+    }
+
+    function test_anAttestationNamesItsControllerSoRelayingCannotRedirectIt() public {
+        address customer = makeAddr("customer");
+        uint48 deadline = uint48(block.timestamp + 1 hours);
+        bytes memory attestation = _controllerAttestation(ACME, customer, deadline);
+
+        // Someone who intercepts the attestation and substitutes their own address gets a digest the
+        // signer never signed.
+        vm.expectRevert(TenantPaymaster.InvalidControllerAssignment.selector);
+        paymaster.claimController(ACME, makeAddr("thief"), deadline, attestation);
+    }
+
+    function test_refusesAClaimForTheZeroTenantOrToNowhere() public {
+        uint48 deadline = uint48(block.timestamp + 1 hours);
+        vm.expectRevert(TenantPaymaster.ZeroTenant.selector);
+        paymaster.claimController(bytes32(0), makeAddr("customer"), deadline, "");
+
+        vm.expectRevert(TenantPaymaster.ZeroAddress.selector);
+        paymaster.claimController(ACME, address(0), deadline, "");
+    }
+
+    function test_aControllerHandsOverToANewWalletImmediately() public {
+        vm.deal(address(this), 1 ether);
+        paymaster.depositFor{value: 1 ether}(ACME);
+        address oldWallet = makeAddr("oldWallet");
+        address newWallet = makeAddr("newWallet");
+        vm.prank(owner);
+        paymaster.setController(ACME, oldWallet);
+
+        vm.prank(oldWallet);
+        paymaster.transferController(ACME, newWallet);
+        assertEq(paymaster.controllerOf(ACME), newWallet);
+
+        vm.prank(newWallet);
+        paymaster.withdrawFor(ACME, payable(newWallet), 1 ether);
+        assertEq(newWallet.balance, 1 ether);
+
+        // And the old wallet has lost control.
+        vm.prank(oldWallet);
+        vm.expectRevert(abi.encodeWithSelector(TenantPaymaster.NotTenantController.selector, ACME, oldWallet));
+        paymaster.transferController(ACME, oldWallet);
+    }
+
+    function test_aHandoverDoesNotSkipAPendingClaimDelay() public {
+        address claimed = makeAddr("claimed");
+        uint48 deadline = uint48(block.timestamp + 1 hours);
+        paymaster.claimController(ACME, claimed, deadline, _controllerAttestation(ACME, claimed, deadline));
+        uint256 activeAt = paymaster.controllerActiveAt(ACME);
+
+        // Otherwise a thief could claim with a stolen signer key and immediately hand to a second
+        // wallet to dodge the window the delay exists to create.
+        address second = makeAddr("second");
+        vm.prank(claimed);
+        paymaster.transferController(ACME, second);
+        assertEq(paymaster.controllerActiveAt(ACME), activeAt);
+    }
+
+    function test_onlyTheControllerMayHandOver() public {
+        address stranger = makeAddr("stranger");
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(TenantPaymaster.NotTenantController.selector, ACME, stranger));
+        paymaster.transferController(ACME, stranger);
+
+        // A tenant with no controller has controllerOf == address(0); that must not make the zero
+        // address its controller.
+        vm.prank(address(0));
+        vm.expectRevert(abi.encodeWithSelector(TenantPaymaster.NotTenantController.selector, ACME, address(0)));
+        paymaster.transferController(ACME, stranger);
+    }
+
+    function test_refusesAHandoverToNowhere() public {
+        address customer = makeAddr("customer");
+        vm.prank(owner);
+        paymaster.setController(ACME, customer);
+
+        vm.prank(customer);
+        vm.expectRevert(TenantPaymaster.ZeroAddress.selector);
+        paymaster.transferController(ACME, address(0));
+    }
+
+    function test_publishesTheControllerAssignmentDigest() public view {
+        address customer = address(0xc0ffee);
+        uint48 deadline = 1_900_000_000;
+        // The backend signs this off chain; if it drifts, every claim fails.
+        bytes32 structHash = keccak256(
+            abi.encode(
+                keccak256("ControllerAssignment(bytes32 tenant,address controller,uint256 nonce,uint48 deadline)"),
+                ACME,
+                customer,
+                uint256(7),
+                deadline
+            )
+        );
+        bytes32 expected = keccak256(abi.encodePacked(hex"1901", paymaster.domainSeparator(), structHash));
+        assertEq(paymaster.getControllerAssignmentHash(ACME, customer, 7, deadline), expected);
+    }
+
+    /*//////////////////////////////////////////////////////////////
                                  HELPERS
     //////////////////////////////////////////////////////////////*/
+
+    function _controllerAttestation(
+        bytes32 tenant,
+        address controller,
+        uint48 deadline
+    ) internal view returns (bytes memory) {
+        bytes32 digest =
+            paymaster.getControllerAssignmentHash(tenant, controller, paymaster.controllerNonce(tenant), deadline);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, digest);
+        return abi.encodePacked(r, s, v);
+    }
 
     function _sponsored(
         bytes32 tenant,

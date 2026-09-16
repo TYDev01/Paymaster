@@ -20,8 +20,8 @@ export default function OverviewPage() {
     <>
       <h1 className="text-lg font-semibold text-ash-100">Welcome to {session.tenant.name}</h1>
       <p className="mt-1 text-sm leading-relaxed text-ash-500">
-        Three things stand between you and a sponsored transaction. They can be done in any order,
-        but nothing is sponsored until all three are true.
+        Three things stand between you and a sponsored transaction. They can be done in any order, but nothing is
+        sponsored until all three are true.
       </p>
 
       <ol className="mt-6 space-y-3">

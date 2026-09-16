@@ -30,6 +30,18 @@ import {FundingMonitor} from "../monitoring/fundingMonitor.js";
 import {OtlpTracer} from "../monitoring/otlpTracer.js";
 import {noopTracer, type Tracer} from "../monitoring/tracing.js";
 import {SpendReconciler} from "../reconciliation/spendReconciler.js";
+import {ChainRegistryTenantLedgerSource, TenantLedgerReconciler} from "../reconciliation/tenantLedgerReconciler.js";
+import {PostgresTenantLedgerStore} from "../db/postgresTenantLedgerStore.js";
+import {PaymentVerifier} from "../billing/paymentVerifier.js";
+import {parsePlansJson, type PlanCatalogue} from "../billing/plans.js";
+import {
+  CompositeSubscriptionNotifier,
+  LoggingSubscriptionNotifier,
+  SubscriptionNoticeService,
+  WebhookSubscriptionNotifier,
+  type SubscriptionNotifier,
+} from "../billing/subscriptionNotices.js";
+import {PlanCeilingPolicyRepository} from "../policy/planCeilings.js";
 import {ChainRegistryEventSource} from "../reconciliation/chainEventSource.js";
 import {PostgresSpendReconciliationStore} from "../db/postgresSpendReconciliationStore.js";
 import {AlwaysLeader, RedisLeaderLock, type LeaderLock} from "../monitoring/leaderLock.js";
@@ -104,6 +116,10 @@ export interface AppDependencies {
   readonly policyBroadcast?: PolicyBroadcast | undefined;
   /** Exchanges an identity-provider token for a tenant-scoped session. Absent without Privy. */
   readonly tenantSessions?: TenantSessionService | undefined;
+  /** The plan catalogue from PLANS. Absent (or empty) on a deployment that sells no plans. */
+  readonly plans?: PlanCatalogue | undefined;
+  /** Verifies self-service payment claims. Absent without BILLING_TREASURY_ADDRESS. */
+  readonly paymentVerifier?: PaymentVerifier | undefined;
   readonly env: Env;
 }
 
@@ -123,11 +139,16 @@ export class AppModule {
     // actually runs a multi-tenant paymaster asks it something.
     const tenantBalances = deps.tenantBalances ?? new TenantBalanceReader(deps.chains);
 
-    // `unsubscribedAllows` stays at its default of true: every tenant that predates the
-    // subscriptions table has no row, and flipping this would take a working deployment offline on
-    // upgrade. A deployment that sells subscriptions turns it off once its customers have rows.
+    // `unsubscribedAllows` defaults to true through SUBSCRIPTION_REQUIRED=false: every tenant that
+    // predates the subscriptions table has no row, and refusing them would take a working deployment
+    // offline on upgrade. A deployment that sells subscriptions sets it once its customers have rows.
     const subscriptionState =
-      deps.subscriptions === undefined ? undefined : new SubscriptionService(deps.subscriptions);
+      deps.subscriptions === undefined
+        ? undefined
+        : new SubscriptionService(deps.subscriptions, {
+            unsubscribedAllows: !deps.env.SUBSCRIPTION_REQUIRED,
+            noticeSeconds: deps.env.SUBSCRIPTION_NOTICE_SECONDS,
+          });
 
     const sponsorService = new SponsorService({
       chains: deps.chains,
@@ -161,6 +182,9 @@ export class AppModule {
       tenantBalances,
       subscriptions: deps.subscriptions,
       subscriptionState,
+      signer: deps.signer,
+      plans: deps.plans,
+      paymentVerifier: deps.paymentVerifier,
     });
 
     const providers: Provider[] = [
@@ -254,6 +278,10 @@ export async function buildDependencies(
 
   const quotas: QuotaStore = redis === undefined ? new InMemoryQuotaStore() : new RedisQuotaStore(redis);
 
+  // Parsed at startup like CHAINS: a malformed plan catalogue is a crash with the offending field
+  // named, never a deployment that quietly sells nothing or applies no ceilings.
+  const plans = parsePlansJson(env.PLANS, env.DEFAULT_PLAN_ID);
+
   // Policy changes reach every replica, not just the one that served the admin request. Without
   // Redis this is a no-op, which is correct: there are no other replicas to tell.
   const policyBroadcast: PolicyBroadcast =
@@ -289,11 +317,32 @@ export async function buildDependencies(
     await ensureBootstrapPolicy(policyRepository, env);
   }
 
-  const repository: PolicyRepository = policyRepository ?? {load: async () => makePolicies(quotas)};
+  const subscriptions = pool === undefined ? undefined : new SubscriptionRepository(pool);
+
+  // Plan ceilings wrap whatever the policies come from, so a tenant's own rules and their plan's
+  // limits are ANDed on every reload. Only with plans to apply and a record of who is on which.
+  const baseRepository: PolicyRepository = policyRepository ?? {load: async () => makePolicies(quotas)};
+  const repository: PolicyRepository =
+    subscriptions === undefined || plans.size === 0
+      ? baseRepository
+      : new PlanCeilingPolicyRepository(baseRepository, plans, subscriptions, quotas);
   const policySource = new PolicySource(repository);
   await policySource.reload();
 
-  const backgroundServices = buildBackgroundServices(env, {chains, policies: policySource, pool, metrics}, alerter);
+  const paymentVerifier =
+    env.BILLING_TREASURY_ADDRESS === undefined || plans.size === 0
+      ? undefined
+      : new PaymentVerifier(chains, {
+          treasury: env.BILLING_TREASURY_ADDRESS as `0x${string}`,
+          confirmations: env.BILLING_CONFIRMATIONS,
+          maxPeriodsPerPayment: env.BILLING_MAX_PERIODS_PER_PAYMENT,
+        });
+
+  const backgroundServices = buildBackgroundServices(
+    env,
+    {chains, policies: policySource, pool, metrics, subscriptions},
+    alerter,
+  );
   // The tracer's flush loop is a background service like any other, so shutdown drains the last
   // spans through the same lifecycle that stops the monitors.
   if (tracer instanceof OtlpTracer) backgroundServices.push(tracer);
@@ -411,7 +460,9 @@ export async function buildDependencies(
     sponsorships: pool === undefined ? undefined : new SponsorshipRepository(pool),
     policyRepository,
     audit: pool === undefined ? undefined : new AuditLogRepository(pool),
-    subscriptions: pool === undefined ? undefined : new SubscriptionRepository(pool),
+    subscriptions,
+    plans,
+    paymentVerifier,
     pool,
     redis,
     quotasAreLocal: redis === undefined,
@@ -502,10 +553,52 @@ function buildBackgroundServices(
     policies: PolicySource;
     pool: DatabasePool | undefined;
     metrics: PaymasterMetrics | undefined;
+    subscriptions?: SubscriptionRepository | undefined;
   },
   alerter: Alerter = new LoggingAlerter(),
 ): BackgroundService[] {
   const services: BackgroundService[] = [];
+
+  if (env.SUBSCRIPTION_NOTICE_ENABLED && deps.subscriptions !== undefined) {
+    // The log sink always; the webhook alongside it when configured, so a failed delivery is still
+    // recorded where an operator can find it.
+    const sinks: SubscriptionNotifier[] = [new LoggingSubscriptionNotifier()];
+    if (env.SUBSCRIPTION_NOTICE_WEBHOOK_URL !== undefined) {
+      sinks.push(
+        new WebhookSubscriptionNotifier({
+          url: env.SUBSCRIPTION_NOTICE_WEBHOOK_URL,
+          timeoutMs: env.ALERT_WEBHOOK_TIMEOUT_MS,
+          signingSecret: env.SUBSCRIPTION_NOTICE_SIGNING_SECRET,
+        }),
+      );
+    }
+    services.push(
+      new SubscriptionNoticeService(deps.subscriptions, new CompositeSubscriptionNotifier(sinks), {
+        intervalMs: env.SUBSCRIPTION_NOTICE_INTERVAL_MS,
+        noticeSeconds: env.SUBSCRIPTION_NOTICE_SECONDS,
+      }),
+    );
+  }
+
+  const tenantChainIds = deps.chains.adapters
+    .filter((adapter) => adapter.config.paymasterKind === "tenant")
+    .map((adapter) => adapter.chainId);
+  if (env.TENANT_LEDGER_RECONCILER_ENABLED && deps.pool !== undefined && tenantChainIds.length > 0) {
+    services.push(
+      new TenantLedgerReconciler(
+        new ChainRegistryTenantLedgerSource(deps.chains),
+        new PostgresTenantLedgerStore(deps.pool),
+        alerter,
+        {
+          intervalMs: env.RECONCILER_INTERVAL_MS,
+          confirmations: env.RECONCILER_CONFIRMATIONS,
+          maxBlockRange: env.RECONCILER_MAX_BLOCK_RANGE,
+          initialLookbackBlocks: env.RECONCILER_INITIAL_LOOKBACK_BLOCKS,
+          chainIds: tenantChainIds,
+        },
+      ),
+    );
+  }
 
   if (env.FUNDING_MONITOR_ENABLED && deps.chains.allChainIds.length > 0) {
     const metrics = deps.metrics;

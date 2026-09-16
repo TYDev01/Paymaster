@@ -27,6 +27,57 @@ const TOKEN_BALANCE_ABI = parseAbi(["function balanceOf(address account) view re
 /** `TenantPaymaster.balanceOf`. Same name as the ERC-20 one above, but keyed by tenant, not holder. */
 const TENANT_BALANCE_ABI = parseAbi(["function balanceOf(bytes32 tenant) view returns (uint256)"]);
 
+/** Who may withdraw a tenant's balance, and what the next claim attestation must carry. */
+const TENANT_CONTROLLER_ABI = parseAbi([
+  "function controllerOf(bytes32 tenant) view returns (address)",
+  "function controllerNonce(bytes32 tenant) view returns (uint256)",
+  "function controllerActiveAt(bytes32 tenant) view returns (uint256)",
+]);
+
+/** The solvency side of the ledger: what the contract believes tenants are owed in total. */
+const TENANT_TOTAL_ABI = parseAbi(["function totalTenantBalance() view returns (uint256)"]);
+
+/**
+ * Every event that moves a tenant balance. Replaying them is how the ledger reconciler checks the
+ * chain's per-tenant numbers against their own history rather than against our records.
+ */
+const TENANT_LEDGER_EVENTS = parseAbi([
+  "event TenantDeposited(bytes32 indexed tenant, address indexed from, uint256 amount, uint256 balance)",
+  "event TenantWithdrawn(bytes32 indexed tenant, address indexed to, uint256 amount, uint256 balance)",
+  "event TenantCharged(bytes32 indexed tenant, uint256 reserved, uint256 charged, uint256 balance)",
+]);
+
+export interface TenantControllerState {
+  /** The zero address when nobody controls the balance. */
+  readonly controller: Address;
+  readonly nonce: bigint;
+  /** Unix seconds from which the controller may withdraw. 0 means immediately. */
+  readonly activeAt: number;
+}
+
+/** One balance movement, with the tenant's balance as the contract reported it afterwards. */
+export interface TenantLedgerEvent {
+  readonly kind: "deposit" | "withdrawal" | "charge";
+  readonly tenant: Hex;
+  /** Signed effect on the balance, in wei: positive for a deposit, negative otherwise. */
+  readonly deltaWei: bigint;
+  readonly balanceAfterWei: bigint;
+  readonly blockNumber: bigint;
+  readonly logIndex: number;
+  readonly transactionHash: Hex;
+}
+
+/** A native-currency transfer, as the billing verifier needs to see it. */
+export interface NativeTransfer {
+  readonly hash: Hex;
+  readonly from: Address;
+  readonly to: Address | null;
+  readonly valueWei: bigint;
+  readonly input: Hex;
+  readonly success: boolean;
+  readonly blockNumber: bigint;
+}
+
 /**
  * The EntryPoint event the reconciler reads. `sender` and `paymaster` are indexed, so a log filter
  * on our paymaster address is served from the node's index rather than by scanning every op.
@@ -280,6 +331,156 @@ export class ChainAdapter {
         args: [tenant],
       }),
     );
+  }
+
+  /** Who controls a tenant's balance on this chain. Tenant paymasters only. */
+  async getTenantController(tenant: Hex): Promise<TenantControllerState> {
+    this.#assertTenantKind();
+    const [controller, nonce, activeAt] = await Promise.all(
+      (["controllerOf", "controllerNonce", "controllerActiveAt"] as const).map((functionName) =>
+        this.#call(() =>
+          this.#client.readContract({
+            address: this.config.paymaster,
+            abi: TENANT_CONTROLLER_ABI,
+            functionName,
+            args: [tenant],
+          }),
+        ),
+      ),
+    );
+    return {controller: controller as Address, nonce: nonce as bigint, activeAt: Number(activeAt as bigint)};
+  }
+
+  /**
+   * A tenant's balance and the contract's running total, both read at `blockNumber`.
+   *
+   * Pinned to one block so the ledger reconciler compares a replayed history against the state at
+   * exactly the block that history ends — reading `latest` would include movements it has not
+   * replayed yet and report drift that is not there.
+   */
+  async getTenantBalanceAt(tenant: Hex, blockNumber: bigint): Promise<bigint> {
+    this.#assertTenantKind();
+    return this.#call(() =>
+      this.#client.readContract({
+        address: this.config.paymaster,
+        abi: TENANT_BALANCE_ABI,
+        functionName: "balanceOf",
+        args: [tenant],
+        blockNumber,
+      }),
+    );
+  }
+
+  /** `totalTenantBalance()` and the EntryPoint deposit, at one block. The contract's solvency. */
+  async getTenantSolvencyAt(blockNumber: bigint): Promise<{totalTenantBalance: bigint; deposit: bigint}> {
+    this.#assertTenantKind();
+    const [totalTenantBalance, deposit] = await Promise.all([
+      this.#call(() =>
+        this.#client.readContract({
+          address: this.config.paymaster,
+          abi: TENANT_TOTAL_ABI,
+          functionName: "totalTenantBalance",
+          blockNumber,
+        }),
+      ),
+      this.#call(() =>
+        this.#client.readContract({
+          address: this.config.entryPoint,
+          abi: ENTRYPOINT_ABI,
+          functionName: "balanceOf",
+          args: [this.config.paymaster],
+          blockNumber,
+        }),
+      ),
+    ]);
+    return {totalTenantBalance, deposit};
+  }
+
+  /** Every tenant balance movement in `[fromBlock, toBlock]`, in chain order. */
+  async getTenantLedgerEvents(fromBlock: bigint, toBlock: bigint): Promise<readonly TenantLedgerEvent[]> {
+    this.#assertTenantKind();
+    const logs = await this.#call(() =>
+      this.#client.getLogs({address: this.config.paymaster, events: TENANT_LEDGER_EVENTS, fromBlock, toBlock}),
+    );
+
+    return logs
+      .map((log): TenantLedgerEvent => {
+        const base = {
+          blockNumber: log.blockNumber ?? 0n,
+          logIndex: log.logIndex ?? 0,
+          transactionHash: (log.transactionHash ?? "0x") as Hex,
+        };
+        switch (log.eventName) {
+          case "TenantDeposited":
+            return {
+              ...base,
+              kind: "deposit",
+              tenant: log.args.tenant!,
+              deltaWei: log.args.amount!,
+              balanceAfterWei: log.args.balance!,
+            };
+          case "TenantWithdrawn":
+            return {
+              ...base,
+              kind: "withdrawal",
+              tenant: log.args.tenant!,
+              deltaWei: -log.args.amount!,
+              balanceAfterWei: log.args.balance!,
+            };
+          case "TenantCharged":
+            // `reserved` left the balance in validation; `reserved - charged` came back in postOp.
+            // The net effect of the pair is `-charged`, and that is what the event nets out to.
+            return {
+              ...base,
+              kind: "charge",
+              tenant: log.args.tenant!,
+              deltaWei: -log.args.charged!,
+              balanceAfterWei: log.args.balance!,
+            };
+        }
+      })
+      .sort((a, b) =>
+        a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : a.blockNumber < b.blockNumber ? -1 : 1,
+      );
+  }
+
+  /**
+   * A mined transaction and whether it succeeded, or undefined when the chain does not know it.
+   *
+   * For billing: a customer claims a payment by hash, and this is what the claim is checked
+   * against — never anything the customer says about the transfer.
+   */
+  async getNativeTransfer(hash: Hex): Promise<NativeTransfer | undefined> {
+    try {
+      const [transaction, receipt] = await Promise.all([
+        this.#call(() => this.#client.getTransaction({hash})),
+        this.#call(() => this.#client.getTransactionReceipt({hash})),
+      ]);
+      return {
+        hash,
+        from: transaction.from,
+        to: transaction.to,
+        valueWei: transaction.value,
+        input: transaction.input,
+        success: receipt.status === "success",
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      // viem names both not-found cases; anything else (an RPC outage) must surface, not read as
+      // "no such payment".
+      const name = (error as {name?: string}).name;
+      if (name === "TransactionNotFoundError" || name === "TransactionReceiptNotFoundError") return undefined;
+      throw error;
+    }
+  }
+
+  #assertTenantKind(): void {
+    if (this.config.paymasterKind !== "tenant") {
+      throw new Error(
+        `chain ${this.config.chainId} (${this.config.name}) runs a ${this.config.paymasterKind} ` +
+          "paymaster, which has no per-tenant balances",
+      );
+    }
   }
 
   /**

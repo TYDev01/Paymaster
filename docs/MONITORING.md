@@ -147,6 +147,22 @@ paymaster. Less urgent than the deposit — it degrades acceptance, it does not 
 already accepted — but it is not optional in production. Add stake; the unstake delay means this
 cannot be fixed instantly, so do not let it sit.
 
+### Tenant ledger drift (backend alert: `tenant-ledger-drift:<chain>:<tenantKey>`)
+**Money, and the quiet kind.** A tenant's balance in the contract does not match its own event
+history: wei moved with no `TenantDeposited`, `TenantWithdrawn` or `TenantCharged` to explain it. The
+likeliest cause is a reservation taken during validation that `postOp` never settled — the tenant was
+charged and nothing says so. The detail names the expected and actual balances and the difference.
+Reconcile that tenant's operations against `UserOperationEvent`s for the same blocks, and treat any
+shortfall as owed to the customer. The reconciler re-bases on the chain after reporting, so this pages
+once per incident rather than every tick; a recurrence is a NEW divergence, not the same one.
+
+### Tenant paymaster insolvent (backend alert: `tenant-solvency:<chain>`)
+**Stop and look immediately.** `totalTenantBalance()` exceeds the EntryPoint deposit, so tenants are
+collectively owed more than the contract can pay and the last customers to spend will be refused with
+their balances reading healthy. The contract preserves this invariant by construction (there is a
+Foundry invariant suite for it), so on a deployed contract the cause is almost always an owner
+`withdrawTo` of the shared deposit. Restore the deposit to at least the total owed.
+
 ### PaymasterFundingUnreadable
 The funding monitor cannot read deposit/stake for 10 minutes. The balance is **unknown**, not
 known-good. Treat it as a potential deposit alert until you can read the value.
@@ -240,13 +256,45 @@ re-fires after `FUNDING_MONITOR_REALERT_MS` if still unresolved, and resolves wh
 Set `ALERT_WEBHOOK_MIN_SEVERITY=critical` to page only for what stops sponsorship outright; warnings
 still reach the log.
 
+## Alertmanager routing
+
+`deploy/monitoring/alertmanager/alertmanager.yml` is the routing half: Prometheus evaluates the rules
+and hands firing alerts to Alertmanager, which decides who hears about them.
+
+| Severity | Where it goes | Repeat |
+| --- | --- | --- |
+| `critical` | Pager (PagerDuty Events API v2), and chat as well so the team sees what paged | hourly until resolved |
+| `warning` | Chat | every 4 hours |
+
+While a chain has a critical firing, its warnings are inhibited: they are noise about the same
+incident. Alerts with no severity are dropped rather than paged — every rule we ship has one, so that
+only catches a rule added without it.
+
+**Credentials come from files**, not from the config: `/etc/alertmanager/secrets/pagerduty_routing_key`
+and `/etc/alertmanager/secrets/slack_webhook_url`. That is what lets this file be committed and used
+unchanged in every environment. `deploy/monitoring/alertmanager/secrets/README.md` has the details;
+in Kubernetes, mount a Secret with those two keys at that path.
+
+It runs in the local stack under the monitoring profile (`docker compose --profile monitoring up`,
+UI on `:9093`) and receives alerts from the compose Prometheus. In Kubernetes the chart ships the
+rules as a `PrometheusRule` and your cluster's existing Alertmanager routes them — use this file as
+the reference for the routes and the inhibit rule.
+
+Validate a change before shipping it:
+
+```bash
+docker run --rm -v "$PWD/deploy/monitoring/alertmanager:/etc/alertmanager" \
+  --entrypoint amtool prom/alertmanager:v0.28.1 check-config /etc/alertmanager/alertmanager.yml
+```
+
 ---
 
 ## What is deliberately not here
 
-- **Alertmanager** is not configured in the compose stack. Routing, silencing and escalation are
-  deployment decisions, and a dev stack that pages is a dev stack people mute. The rules are ready
-  for one; point `alerting:` in `prometheus.yml` at it.
+- **A second paging path for what the backend already watches.** The backend pages directly for the
+  conditions it detects itself; Alertmanager carries what only a time series can see. Only the
+  funding rules are duplicated, deliberately, as a backstop for a broken alert egress — and the
+  inhibit rule stops that from double-paging.
 - **Log aggregation.** The service logs structured lines to stdout; shipping them is the platform's
   job, not the application's.
 - **Metrics for per-IP or per-key dimensions.** Unbounded cardinality, caller-controlled. The

@@ -162,6 +162,63 @@ export class SubscriptionRepository {
     return rows.map(toPayment);
   }
 
+  /**
+   * Subscriptions that need a notice now, and have not had that notice for this period.
+   *
+   * `renewal-due`: ending within `noticeSeconds`. `grace`: already past `paid_through` and not yet
+   * past the grace window. A lapsed subscription gets nothing further here — sponsorship has already
+   * stopped, and the dashboard says so.
+   */
+  async dueForNotice(
+    now: number,
+    noticeSeconds: number,
+  ): Promise<readonly (Subscription & {kind: "renewal-due" | "grace"; tenantName: string})[]> {
+    const {rows} = await this.pool.query<SubscriptionRow & {kind: "renewal-due" | "grace"; tenant_name: string}>(
+      `SELECT s.tenant_id, s.plan, extract(epoch FROM s.paid_through)::bigint AS paid_through, s.grace_seconds,
+              t.name AS tenant_name, due.kind
+         FROM tenant_subscriptions s
+         JOIN tenants t ON t.id = s.tenant_id
+         CROSS JOIN LATERAL (
+           SELECT CASE
+                    WHEN s.paid_through >= to_timestamp($1) THEN 'renewal-due'
+                    ELSE 'grace'
+                  END AS kind
+         ) due
+        WHERE t.status = 'active'
+          AND s.paid_through <= to_timestamp($1 + $2)
+          AND s.paid_through + make_interval(secs => s.grace_seconds) >= to_timestamp($1)
+          AND NOT EXISTS (
+            SELECT 1 FROM subscription_notices n
+             WHERE n.tenant_id = s.tenant_id AND n.paid_through = s.paid_through AND n.kind = due.kind
+          )
+        ORDER BY s.paid_through`,
+      [now, noticeSeconds],
+    );
+    return rows.map((row) => ({...toSubscription(row), kind: row.kind, tenantName: row.tenant_name}));
+  }
+
+  /**
+   * Records that a notice is being sent. True when THIS call claimed it; false when another replica
+   * (or an earlier tick) already did, in which case the caller must not send it.
+   */
+  async claimNotice(tenantId: TenantId, paidThrough: number, kind: "renewal-due" | "grace"): Promise<boolean> {
+    const {rowCount} = await this.pool.query(
+      `INSERT INTO subscription_notices (tenant_id, paid_through, kind)
+       VALUES ($1, to_timestamp($2), $3)
+       ON CONFLICT DO NOTHING`,
+      [tenantId, paidThrough, kind],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  /** Every tenant's current plan id, for applying plan ceilings on policy reload. One query. */
+  async planIdsByTenant(): Promise<ReadonlyMap<string, string>> {
+    const {rows} = await this.pool.query<{tenant_id: string; plan: string}>(
+      "SELECT tenant_id, plan FROM tenant_subscriptions",
+    );
+    return new Map(rows.map((row) => [row.tenant_id, row.plan]));
+  }
+
   /** Sets the grace window. Separate from payment because it is a policy change, not a purchase. */
   async setGraceSeconds(tenantId: TenantId, graceSeconds: number): Promise<void> {
     await this.pool.query(

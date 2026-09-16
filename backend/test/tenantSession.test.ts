@@ -183,9 +183,14 @@ describe("tenant sessions", () => {
       // Loud beats subtly broken. Swallowing this would return a working session for an account
       // that can never sponsor — the very failure the provisioning exists to prevent, now with a
       // green light in front of it.
-      const failing = service(ALICE, true, () => "t_nopolicy", async () => {
-        throw new Error("policy store unavailable");
-      });
+      const failing = service(
+        ALICE,
+        true,
+        () => "t_nopolicy",
+        async () => {
+          throw new Error("policy store unavailable");
+        },
+      );
 
       await expect(failing.signUp("provider-token", "Acme")).rejects.toThrow("policy store unavailable");
     });

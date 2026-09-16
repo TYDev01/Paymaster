@@ -7,8 +7,17 @@ import {UnknownPolicyError} from "../../policy/policySource.js";
 import {InvalidSponsorshipRequestError} from "../../signature/signatureEngine.js";
 import {InvalidRuleConfigError} from "../../policy/policyFactory.js";
 import {PolicyNotFoundError} from "../../db/postgresPolicyRepository.js";
-import {AdminUnavailableError, PolicyInUseError, RoleEscalationError} from "../admin/admin.service.js";
+import {
+  AdminUnavailableError,
+  ControllerAlreadyAssignedError,
+  FundingNotApplicableError,
+  PolicyInUseError,
+  RoleEscalationError,
+} from "../admin/admin.service.js";
 import {SponsorshipDeniedError} from "../sponsor/sponsor.service.js";
+import {PaymentVerificationError} from "../../billing/paymentVerifier.js";
+import {UnknownPlanError} from "../../billing/plans.js";
+import {DuplicatePaymentError} from "../../db/subscriptionRepository.js";
 
 /**
  * Maps domain errors to HTTP without leaking how the policy set is shaped.
@@ -117,6 +126,52 @@ export class DomainErrorFilter implements ExceptionFilter {
       return {
         status: HttpStatus.FORBIDDEN,
         body: {error: "ROLE_ESCALATION", message: exception.message},
+        logLevel: "warn",
+      };
+    }
+
+    // 422: the request is well-formed and the transaction exists, but it does not pay for what was
+    // claimed. The message is written for the customer and names what to do next.
+    if (exception instanceof PaymentVerificationError) {
+      return {
+        status: HttpStatus.UNPROCESSABLE_ENTITY,
+        body: {error: "PAYMENT_NOT_ACCEPTED", code: exception.code, message: exception.message},
+        logLevel: "warn",
+      };
+    }
+
+    // 409: the payment was already credited. Not an error worth alarming a customer about — a retried
+    // claim after a slow response lands here — so the message says it counted.
+    if (exception instanceof DuplicatePaymentError) {
+      return {
+        status: HttpStatus.CONFLICT,
+        body: {error: "PAYMENT_ALREADY_CREDITED", message: "that payment has already been credited"},
+        logLevel: "warn",
+      };
+    }
+
+    if (exception instanceof UnknownPlanError) {
+      return {
+        status: HttpStatus.BAD_REQUEST,
+        body: {error: "UNKNOWN_PLAN", message: exception.message},
+        logLevel: "warn",
+      };
+    }
+
+    if (exception instanceof FundingNotApplicableError) {
+      return {
+        status: HttpStatus.BAD_REQUEST,
+        body: {error: "FUNDING_NOT_APPLICABLE", message: exception.message},
+        logLevel: "warn",
+      };
+    }
+
+    // 409: the balance is in a state that refuses this, and the message names the wallet that can
+    // change it. That wallet is the tenant's own controller, so naming it discloses nothing.
+    if (exception instanceof ControllerAlreadyAssignedError) {
+      return {
+        status: HttpStatus.CONFLICT,
+        body: {error: "CONTROLLER_ALREADY_ASSIGNED", message: exception.message},
         logLevel: "warn",
       };
     }

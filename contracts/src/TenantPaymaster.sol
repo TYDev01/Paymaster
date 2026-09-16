@@ -73,6 +73,20 @@ contract TenantPaymaster is BasePaymaster, Ownable2Step, Pausable, EIP712 {
         "Sponsorship(address sender,uint256 nonce,bytes32 initCodeHash,bytes32 callDataHash,bytes32 accountGasLimits,uint256 paymasterGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes32 tenant,uint48 validUntil,uint48 validAfter)"
     );
 
+    /// @dev What the platform signs to let a customer name their own withdrawal wallet. The nonce
+    ///      makes each attestation single-use and lets the owner void outstanding ones.
+    bytes32 private constant CONTROLLER_TYPEHASH =
+        keccak256("ControllerAssignment(bytes32 tenant,address controller,uint256 nonce,uint48 deadline)");
+
+    /// @notice How long a controller claimed by attestation waits before it may withdraw.
+    /// @dev The attestation comes from the same signer that approves sponsorships, which is an
+    ///      online key. On its own it would let whoever steals that key name themselves controller of
+    ///      every unclaimed tenant and empty them in the same block. The delay turns that into a
+    ///      window the owner can see (ControllerClaimed) and cancel (setController), and it applies
+    ///      only to this path — a controller handing over to a new wallet, or the owner assigning
+    ///      one, takes effect immediately.
+    uint256 public constant CONTROLLER_CLAIM_DELAY = 1 days;
+
     /*//////////////////////////////////////////////////////////////
                                  STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -93,6 +107,12 @@ contract TenantPaymaster is BasePaymaster, Ownable2Step, Pausable, EIP712 {
     ///      that is theirs and a balance we say is theirs.
     mapping(bytes32 tenant => address controller) public controllerOf;
 
+    /// @notice The nonce the next controller attestation for a tenant must carry.
+    mapping(bytes32 tenant => uint256 nonce) public controllerNonce;
+
+    /// @notice When a claimed controller may first withdraw. Zero means immediately.
+    mapping(bytes32 tenant => uint256 timestamp) public controllerActiveAt;
+
     /*//////////////////////////////////////////////////////////////
                                   EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -103,6 +123,7 @@ contract TenantPaymaster is BasePaymaster, Ownable2Step, Pausable, EIP712 {
     event TenantWithdrawn(bytes32 indexed tenant, address indexed to, uint256 amount, uint256 balance);
     event TenantCharged(bytes32 indexed tenant, uint256 reserved, uint256 charged, uint256 balance);
     event ControllerSet(bytes32 indexed tenant, address indexed controller);
+    event ControllerClaimed(bytes32 indexed tenant, address indexed controller, uint256 activeAt);
 
     /*//////////////////////////////////////////////////////////////
                                   ERRORS
@@ -117,6 +138,10 @@ contract TenantPaymaster is BasePaymaster, Ownable2Step, Pausable, EIP712 {
     error InsufficientTenantBalance(bytes32 tenant, uint256 balance, uint256 required);
     error NotTenantController(bytes32 tenant, address caller);
     error NothingToWithdraw();
+    error ControllerAlreadySet(bytes32 tenant, address controller);
+    error ControllerAssignmentExpired(uint48 deadline);
+    error InvalidControllerAssignment();
+    error ControllerNotYetActive(bytes32 tenant, uint256 activeAt);
 
     constructor(
         IEntryPoint entryPoint_,
@@ -159,18 +184,98 @@ contract TenantPaymaster is BasePaymaster, Ownable2Step, Pausable, EIP712 {
         return _balances[tenant];
     }
 
-    /// @notice Nominate who may withdraw a tenant's balance.
-    /// @dev Owner-only, because the mapping from a tenant id to a customer lives off chain — this
-    ///      contract cannot tell who "should" control `t_acme`. Handing control over is therefore a
-    ///      deliberate act by the platform, and once done the customer can take their money without
-    ///      further permission.
+    /// @notice Nominate who may withdraw a tenant's balance, or clear it with address(0).
+    /// @dev The owner's override: assigns immediately, and voids every outstanding controller
+    ///      attestation for the tenant by consuming the nonce. That second effect is what makes this
+    ///      the cancel button for a claim made with a stolen signer key.
     function setController(
         bytes32 tenant,
         address controller
     ) external onlyOwner {
         if (tenant == bytes32(0)) revert ZeroTenant();
-        controllerOf[tenant] = controller;
+        _assignController(tenant, controller, 0);
         emit ControllerSet(tenant, controller);
+    }
+
+    /// @notice Become the controller of a tenant that has none, with the platform's attestation.
+    /// @dev Self-service withdrawal. The mapping from tenant id to customer lives off chain, so the
+    ///      contract cannot tell on its own who "should" control a tenant; the backend attests to it
+    ///      for a signed-in owner of the account, and the customer submits the claim from their own
+    ///      wallet. No owner transaction is involved.
+    ///
+    ///      Only for a tenant with NO controller. Once someone controls a balance, replacing them is
+    ///      theirs to do (`transferController`) or the owner's — never the online signer's, which
+    ///      could otherwise reassign a customer's money away from them.
+    ///
+    ///      Anyone may submit an attestation; it names the controller, so relaying one cannot redirect
+    ///      it. The claimed controller can withdraw after CONTROLLER_CLAIM_DELAY.
+    function claimController(
+        bytes32 tenant,
+        address controller,
+        uint48 deadline,
+        bytes calldata signature
+    ) external {
+        if (tenant == bytes32(0)) revert ZeroTenant();
+        if (controller == address(0)) revert ZeroAddress();
+        address current = controllerOf[tenant];
+        if (current != address(0)) revert ControllerAlreadySet(tenant, current);
+        if (block.timestamp > deadline) revert ControllerAssignmentExpired(deadline);
+
+        bytes32 digest = _controllerAssignmentHash(tenant, controller, controllerNonce[tenant], deadline);
+        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, signature);
+        if (err != ECDSA.RecoverError.NoError || !_isSigner[recovered]) revert InvalidControllerAssignment();
+
+        uint256 activeAt = block.timestamp + CONTROLLER_CLAIM_DELAY;
+        _assignController(tenant, controller, activeAt);
+        emit ControllerClaimed(tenant, controller, activeAt);
+    }
+
+    /// @notice Hand control of a tenant's balance to another wallet. Current controller only.
+    /// @dev Immediate: whoever holds the controller key can already withdraw everything, so a delay
+    ///      here would inconvenience the customer without stopping anyone.
+    function transferController(
+        bytes32 tenant,
+        address newController
+    ) external {
+        if (msg.sender != controllerOf[tenant] || msg.sender == address(0)) {
+            revert NotTenantController(tenant, msg.sender);
+        }
+        if (newController == address(0)) revert ZeroAddress();
+        _assignController(tenant, newController, controllerActiveAt[tenant]);
+        emit ControllerSet(tenant, newController);
+    }
+
+    /// @notice The EIP-712 digest the backend signs to let `controller` claim `tenant`.
+    function getControllerAssignmentHash(
+        bytes32 tenant,
+        address controller,
+        uint256 nonce,
+        uint48 deadline
+    ) external view returns (bytes32) {
+        return _controllerAssignmentHash(tenant, controller, nonce, deadline);
+    }
+
+    function _controllerAssignmentHash(
+        bytes32 tenant,
+        address controller,
+        uint256 nonce,
+        uint48 deadline
+    ) private view returns (bytes32) {
+        return _hashTypedDataV4(keccak256(abi.encode(CONTROLLER_TYPEHASH, tenant, controller, nonce, deadline)));
+    }
+
+    /// @dev Every controller change consumes a nonce, so an attestation issued before the change can
+    ///      never be replayed to undo it.
+    function _assignController(
+        bytes32 tenant,
+        address controller,
+        uint256 activeAt
+    ) private {
+        controllerOf[tenant] = controller;
+        controllerActiveAt[tenant] = activeAt;
+        unchecked {
+            ++controllerNonce[tenant];
+        }
     }
 
     /// @notice Withdraw part of a tenant's balance from the EntryPoint deposit.
@@ -182,8 +287,11 @@ contract TenantPaymaster is BasePaymaster, Ownable2Step, Pausable, EIP712 {
         address payable to,
         uint256 amount
     ) external {
-        address controller = controllerOf[tenant];
-        if (msg.sender != owner() && msg.sender != controller) revert NotTenantController(tenant, msg.sender);
+        if (msg.sender != owner()) {
+            if (msg.sender != controllerOf[tenant]) revert NotTenantController(tenant, msg.sender);
+            uint256 activeAt = controllerActiveAt[tenant];
+            if (block.timestamp < activeAt) revert ControllerNotYetActive(tenant, activeAt);
+        }
         if (to == address(0)) revert ZeroAddress();
         if (amount == 0) revert NothingToWithdraw();
 

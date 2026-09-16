@@ -34,6 +34,16 @@ export const PERMISSIONS = [
    * nothing at all.
    */
   "billing:write",
+  /**
+   * Obtain the platform's attestation that names a wallet as the withdrawal controller of this
+   * tenant's on-chain balance, and claim a subscription payment against this tenant.
+   *
+   * Separate from `key:write` because it is authority over MONEY rather than over credentials. It
+   * cannot move funds by itself — the customer's wallet still has to submit the claim, and the
+   * contract refuses a claim for a tenant that already has a controller — but it decides whose
+   * wallet the balance can be taken out to, so a read-only member must not hold it.
+   */
+  "funding:write",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -58,6 +68,7 @@ export const ROLES = {
     "key:read",
     "key:write",
     "metrics:read",
+    "funding:write",
   ],
 
   /**
@@ -70,7 +81,7 @@ export const ROLES = {
    * theft first had to write an audit entry naming the new credential, which is both visible and
    * revocable without ending every other session.
    */
-  tenant_admin: ["policy:read", "policy:write", "chain:read", "key:read", "key:write", "metrics:read"],
+  tenant_admin: ["policy:read", "policy:write", "chain:read", "key:read", "key:write", "metrics:read", "funding:write"],
 
   /**
    * The platform operator: everything `admin` grants, plus reads across every tenant.
@@ -92,6 +103,7 @@ export const ROLES = {
     "metrics:read",
     "platform:read",
     "billing:write",
+    "funding:write",
   ],
 } as const satisfies Record<string, readonly Permission[]>;
 

@@ -42,8 +42,8 @@ export function SignIn() {
             Sign in
           </button>
           <p className="mt-3 text-[11px] leading-relaxed text-ash-700">
-            Email, a social account, or a wallet. A wallet is created for you if you do not have one —
-            you need one to fund your balance.
+            Email, a social account, or a wallet. A wallet is created for you if you do not have one — you need one to
+            fund your balance.
           </p>
         </>
       ) : memberships !== undefined && memberships.length === 0 ? (
@@ -70,7 +70,9 @@ function ChooseOrganisation() {
   return (
     <div className="mt-6">
       <h2 className="text-sm font-medium text-ash-200">Choose an organisation</h2>
-      <p className="mt-1 text-[11px] text-ash-600">You belong to more than one. Everything you do applies to the one you pick.</p>
+      <p className="mt-1 text-[11px] text-ash-600">
+        You belong to more than one. Everything you do applies to the one you pick.
+      </p>
       <ul className="mt-4 space-y-2">
         {(memberships ?? []).map((tenant) => (
           <li key={tenant.id}>
@@ -108,8 +110,8 @@ function CreateOrganisation() {
     >
       <h2 className="text-sm font-medium text-ash-200">Name your organisation</h2>
       <p className="mt-1 text-[11px] leading-relaxed text-ash-600">
-        Your keys, policies and balance live under it. Only the name is yours to choose — the account
-        id is generated, so it cannot collide with another customer&apos;s.
+        Your keys, policies and balance live under it. Only the name is yours to choose — the account id is generated,
+        so it cannot collide with another customer&apos;s.
       </p>
       <div className="mt-4 flex items-center gap-2 rounded-md border border-ash-800 bg-oil-900 px-3 py-2 focus-within:border-ash-600">
         <LuBuilding className="size-4 shrink-0 text-ash-600" aria-hidden />
@@ -185,14 +187,14 @@ function StalledNotice() {
         <p className="flex gap-2 text-[11px] leading-relaxed text-warning">
           <LuTriangleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden />
           <span>
-            <span className="font-medium">Sign-in is not responding.</span> Nothing is wrong with your
-            account — the identity provider has not answered.
+            <span className="font-medium">Sign-in is not responding.</span> Nothing is wrong with your account — the
+            identity provider has not answered.
           </span>
         </p>
       </div>
       <p className="mt-3 text-[11px] leading-relaxed text-ash-600">
-        A content blocker, a corporate network, or an outage at the provider will all do this. Your
-        balance, keys and sponsorship are unaffected: they do not go through this page.
+        A content blocker, a corporate network, or an outage at the provider will all do this. Your balance, keys and
+        sponsorship are unaffected: they do not go through this page.
       </p>
       <button
         type="button"
@@ -224,9 +226,9 @@ function UnconfiguredNotice({message}: {message: string | undefined}) {
         </p>
       </div>
       <p className="mt-3 text-[11px] leading-relaxed text-ash-600">
-        Set <code className="font-mono text-ash-400">NEXT_PUBLIC_PRIVY_APP_ID</code> to a Privy app id
-        and restart. The backend needs <code className="font-mono text-ash-400">PRIVY_APP_ID</code> set
-        to the same value, or the sessions this app asks for will be refused.
+        Set <code className="font-mono text-ash-400">NEXT_PUBLIC_PRIVY_APP_ID</code> to a Privy app id and restart. The
+        backend needs <code className="font-mono text-ash-400">PRIVY_APP_ID</code> set to the same value, or the
+        sessions this app asks for will be refused.
       </p>
     </Centred>
   );

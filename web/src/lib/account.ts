@@ -39,7 +39,6 @@ export function useAccountResource<T>(resource: string): Resource<T> {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
 
     void (async () => {
       try {
@@ -66,7 +65,14 @@ export function useAccountResource<T>(resource: string): Resource<T> {
     };
   }, [resource, attempt]);
 
-  const reload = useCallback(() => setAttempt((value) => value + 1), []);
+  // `loading` is raised HERE rather than in the effect below. Setting state synchronously inside an
+  // effect body makes React re-render twice for every fetch, and the rule that forbids it is right:
+  // the two places that start a fetch are this callback and the initial mount, and the initial mount
+  // is covered by `useState(true)`.
+  const reload = useCallback(() => {
+    setLoading(true);
+    setAttempt((value) => value + 1);
+  }, []);
   return {data, note, error, loading, reload};
 }
 

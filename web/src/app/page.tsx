@@ -66,8 +66,8 @@ function Hero() {
         Your users stop needing ETH to use your app.
       </h1>
       <p className="mt-4 max-w-2xl text-sm leading-relaxed text-ash-400 sm:text-base">
-        Sponsor gas for the transactions you choose, under limits you set. Gas comes out of a balance
-        you fund and own on chain — not a shared pool, and not credit we extend you.
+        Sponsor gas for the transactions you choose, under limits you set. Gas comes out of a balance you fund and own
+        on chain — not a shared pool, and not credit we extend you.
       </p>
 
       <div className="mt-8 flex flex-wrap items-center gap-3">
@@ -194,10 +194,9 @@ function SelfHosted() {
             Or run the whole thing yourself
           </h2>
           <p className="mt-2 text-[11px] leading-relaxed text-ash-500">
-            The paymaster, the policy engine, the contracts and both consoles are one repository with
-            a Docker Compose stack and a Helm chart. Self-hosting is the original shape of this
-            project, not a downgrade of it — the hosted service is the same code with the multi-tenant
-            contract switched on.
+            The paymaster, the policy engine, the contracts and both consoles are one repository with a Docker Compose
+            stack and a Helm chart. Self-hosting is the original shape of this project, not a downgrade of it — the
+            hosted service is the same code with the multi-tenant contract switched on.
           </p>
         </div>
         <a

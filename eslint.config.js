@@ -22,6 +22,10 @@ export default tseslint.config(
       "**/dist/**",
       "**/build/**",
       "**/coverage/**",
+      // Next's generated types under web/.next. They exist only once `next dev` or `next build` has
+      // run locally, so linting them turned `npm run lint` into a check that passed on a fresh clone
+      // and failed on any machine that had actually run the dashboard.
+      "**/.next/**",
       "contracts/**",
       "frontend/**",
       "**/*.js",

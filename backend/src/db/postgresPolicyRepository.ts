@@ -73,7 +73,7 @@ export class PostgresPolicyRepository implements PolicyRepository {
     return rows.map((row) => ({
       tenantId: row.tenant_id as TenantId,
       id: row.id,
-      rules: row.rules.map((spec) => this.factory.build(row.id, spec)),
+      rules: row.rules.map((spec) => this.factory.build(row.id, spec, row.tenant_id as TenantId)),
     }));
   }
 

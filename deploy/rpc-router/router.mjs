@@ -160,7 +160,10 @@ async function handle(body) {
     stats.default += otherCalls.length;
     const merged = new Map();
     for (const r of [...(traceRes ?? []), ...(otherRes ?? [])]) merged.set(r?.id, r);
-    return body.map((c) => merged.get(c?.id) ?? {jsonrpc: "2.0", id: c?.id ?? null, error: {code: -32603, message: "no response for id"}});
+    return body.map(
+      (c) =>
+        merged.get(c?.id) ?? {jsonrpc: "2.0", id: c?.id ?? null, error: {code: -32603, message: "no response for id"}},
+    );
   }
   const trace = isTraceMethod(body?.method);
   if (trace) stats.trace += 1;
@@ -191,7 +194,13 @@ createServer((req, res) => {
       res.end(JSON.stringify(out));
     } catch (err) {
       res.writeHead(200, {"content-type": "application/json"});
-      res.end(JSON.stringify({jsonrpc: "2.0", id: body?.id ?? null, error: {code: -32603, message: `router: ${err?.message ?? err}`}}));
+      res.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: body?.id ?? null,
+          error: {code: -32603, message: `router: ${err?.message ?? err}`},
+        }),
+      );
     }
   });
 }).listen(PORT, "0.0.0.0", () => {

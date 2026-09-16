@@ -1,6 +1,11 @@
 import {randomUUID} from "node:crypto";
 
-import type {Address, Hex} from "viem";
+import {getAddress, zeroAddress, type Address, type Hex} from "viem";
+
+import type {PaymentVerifier} from "../../billing/paymentVerifier.js";
+import {planView, type PlanCatalogue} from "../../billing/plans.js";
+import {signControllerAssignment} from "../../signature/controllerAssignment.js";
+import type {SponsorshipSigner} from "../../signature/signer.js";
 
 import {generateApiKey} from "../../auth/apiKey.js";
 import type {ChainRegistry} from "../../chain/chainRegistry.js";
@@ -61,6 +66,37 @@ export class PolicyInUseError extends Error {
   }
 }
 
+/** The chain exists but runs the single-tenant paymaster, where there is no per-tenant balance. */
+export class FundingNotApplicableError extends Error {
+  constructor(chainId: number) {
+    super(`chain ${chainId} does not hold per-tenant balances, so there is nothing to control or withdraw`);
+    this.name = "FundingNotApplicableError";
+  }
+}
+
+/**
+ * The balance already has a controller. The contract would refuse the claim; saying so here saves the
+ * customer a reverted transaction, and names who to ask.
+ */
+export class ControllerAlreadyAssignedError extends Error {
+  constructor(
+    readonly chainId: number,
+    readonly controller: Address,
+  ) {
+    super(
+      `this balance on chain ${chainId} is already controlled by ${controller}; ` +
+        "that wallet can hand control over, or the platform operator can reset it",
+    );
+    this.name = "ControllerAlreadyAssignedError";
+  }
+}
+
+/**
+ * How long a controller attestation stays usable. Short: it is meant to be submitted by the wallet
+ * that asked for it within the same page visit, and an unused one lying around is only a liability.
+ */
+const CONTROLLER_ATTESTATION_TTL_SECONDS = 15 * 60;
+
 export interface AdminDeps {
   readonly policies: PostgresPolicyRepository | undefined;
   readonly policySource: PolicySource;
@@ -80,7 +116,19 @@ export interface AdminDeps {
   readonly subscriptions?: SubscriptionRepository | undefined;
   /** Cache in front of the above; invalidated when a payment lands so paying restores service now. */
   readonly subscriptionState?: SubscriptionService | undefined;
+  /**
+   * The sponsorship signer, for controller attestations. Absent means self-service withdrawal is
+   * unavailable and the endpoint says so.
+   */
+  readonly signer?: SponsorshipSigner | undefined;
+  /** What is for sale. Empty on a deployment that sells no plans. */
+  readonly plans?: PlanCatalogue | undefined;
+  /** Checks a claimed payment against the chain. Absent without a treasury address. */
+  readonly paymentVerifier?: PaymentVerifier | undefined;
 }
+
+/** The most a single self-service claim may extend a subscription by: two years. */
+const MAX_CLAIM_EXTENSION_SECONDS = 63_072_000;
 
 /**
  * Everything a customer needs to put money on one chain, and what they have on it now.
@@ -100,6 +148,16 @@ export interface TenantFunding {
   readonly balanceWei: string | null;
   readonly nativeCurrency: {readonly symbol: string; readonly decimals: number};
   readonly explorerUrl: string;
+  /**
+   * Who may withdraw this balance. `null` when it could not be read; the zero address when nobody
+   * controls it yet, which is when the dashboard offers to claim it.
+   */
+  readonly controller: {
+    readonly address: Address;
+    readonly activeAt: number;
+    /** Whether that wallet may withdraw now — past any claim delay. Computed here, against our clock. */
+    readonly active: boolean;
+  } | null;
 }
 
 export interface ActorContext {
@@ -352,6 +410,19 @@ export class AdminService {
         balanceWei = null;
       }
 
+      // Same isolation as the balance: a controller read that fails blanks only itself.
+      let controller: TenantFunding["controller"] = null;
+      try {
+        const state = await chain.getTenantController(onChainTenantKey(tenant));
+        controller = {
+          address: state.controller,
+          activeAt: state.activeAt,
+          active: state.activeAt <= Math.floor(Date.now() / 1000),
+        };
+      } catch {
+        controller = null;
+      }
+
       funding.push({
         chainId: chain.config.chainId,
         chainName: chain.config.name,
@@ -361,10 +432,77 @@ export class AdminService {
         balanceWei,
         nativeCurrency: chain.config.nativeCurrency,
         explorerUrl: chain.config.explorerUrl,
+        controller,
       });
     }
 
     return funding;
+  }
+
+  /**
+   * The attestation that lets `controller` claim withdrawal control of this tenant's balance.
+   *
+   * This is what makes withdrawal self-service: the platform signs, the customer's own wallet
+   * submits `claimController`, and no owner transaction is involved. Refused when the balance
+   * already has a controller — the contract would refuse it too, and the online signer must never be
+   * the thing that replaces a customer's chosen wallet.
+   *
+   * Own tenant only, for the reason `listFunding` is: this names where money can go.
+   */
+  async issueControllerAssignment(
+    request: {chainId: number; controller: string},
+    context: ActorContext,
+    now: number = Math.floor(Date.now() / 1000),
+  ): Promise<{
+    chainId: number;
+    paymaster: Address;
+    tenantKey: Hex;
+    controller: Address;
+    nonce: string;
+    deadline: number;
+    signature: Hex;
+  }> {
+    const chains = this.deps.chains;
+    const signer = this.deps.signer;
+    if (chains === undefined || signer === undefined) throw new AdminUnavailableError();
+
+    const tenant = writingTenant(context.writeScope, "assign a withdrawal controller");
+    const chain = chains.get(request.chainId);
+    if (chain.config.paymasterKind !== "tenant") throw new FundingNotApplicableError(request.chainId);
+
+    const tenantKey = onChainTenantKey(tenant);
+    const state = await chain.getTenantController(tenantKey);
+    if (state.controller !== zeroAddress) {
+      throw new ControllerAlreadyAssignedError(request.chainId, state.controller);
+    }
+
+    const controller = getAddress(request.controller);
+    const assignment = await signControllerAssignment(signer, {
+      chainId: request.chainId,
+      paymaster: chain.config.paymaster,
+      tenant: tenantKey,
+      controller,
+      nonce: state.nonce,
+      deadline: now + CONTROLLER_ATTESTATION_TTL_SECONDS,
+    });
+
+    // Recorded because it is a statement about where this tenant's money may be taken, even though
+    // nothing moves until the wallet submits it.
+    await this.#audit(context, "funding.controller.attest", `chain:${request.chainId}`, {
+      controller,
+      nonce: state.nonce.toString(),
+      deadline: assignment.deadline,
+    });
+
+    return {
+      chainId: assignment.chainId,
+      paymaster: assignment.paymaster,
+      tenantKey,
+      controller,
+      nonce: assignment.nonce.toString(),
+      deadline: assignment.deadline,
+      signature: assignment.signature,
+    };
   }
 
   // ------------------------------------------------------------------------------------------
@@ -437,6 +575,72 @@ export class AdminService {
     // Without this, a customer who has just paid keeps getting refused for the rest of the TTL.
     // Being slow to notice a payment is the one direction of staleness that is unacceptable.
     this.deps.subscriptionState?.invalidate(target);
+    return result;
+  }
+
+  /**
+   * What this customer can buy and how to pay for it: the plans, the treasury address, and the
+   * payment reference their transfer must carry as data.
+   *
+   * The reference is this tenant's key, derived and not secret — but it IS what ties a payment to
+   * this account, so it is shown only to the account's own session.
+   */
+  async getBillingOptions(context: ActorContext) {
+    const tenant = writingTenant(context.writeScope, "read billing options");
+    const verifier = this.deps.paymentVerifier;
+    return {
+      plans: (this.deps.plans?.list() ?? []).map(planView),
+      treasury: verifier?.treasury ?? null,
+      paymentReference: verifier?.paymentData(tenant) ?? null,
+    };
+  }
+
+  /**
+   * Credits a subscription payment the customer made, after checking it on chain.
+   *
+   * The self-service counterpart to `recordSubscriptionPayment`, and deliberately not a widening of
+   * it: that one takes an amount and a period from the caller and so needs `billing:write`; this one
+   * takes only a transaction hash, and the chain supplies the rest. It can only ever credit the
+   * caller's own tenant, and only for a transfer that names that tenant.
+   */
+  async claimSubscriptionPayment(
+    request: {chainId: number; txHash: string; planId: string},
+    context: ActorContext,
+    now: number = Math.floor(Date.now() / 1000),
+  ): Promise<{subscription: Subscription; payment: SubscriptionPayment}> {
+    const repo = this.deps.subscriptions;
+    const verifier = this.deps.paymentVerifier;
+    const plans = this.deps.plans;
+    if (repo === undefined || verifier === undefined || plans === undefined) throw new AdminUnavailableError();
+
+    const tenant = writingTenant(context.writeScope, "claim a subscription payment");
+    const plan = plans.get(request.planId);
+    const verified = await verifier.verify({chainId: request.chainId, txHash: request.txHash as Hex, tenant, plan});
+
+    const periods = Math.min(
+      verified.periods,
+      Math.max(1, Math.floor(MAX_CLAIM_EXTENSION_SECONDS / plan.periodSeconds)),
+    );
+    const result = await repo.recordPayment({
+      tenantId: tenant,
+      plan: plan.id,
+      periodSeconds: plan.periodSeconds * periods,
+      amountWei: verified.amountWei.toString(),
+      chainId: verified.chainId,
+      txHash: verified.txHash.toLowerCase(),
+      // Distinguishable in the history from an operator-recorded payment.
+      recordedBy: `chain-verified:${context.actor}`,
+      note: `verified on chain from ${verified.from}; ${periods} period(s) of ${plan.name}`,
+      now,
+    });
+
+    this.deps.subscriptionState?.invalidate(tenant);
+    await this.#audit(context, "subscription.claim", `payment:${result.payment.id}`, {
+      plan: plan.id,
+      periods,
+      chainId: verified.chainId,
+      txHash: verified.txHash,
+    });
     return result;
   }
 
